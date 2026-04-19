@@ -1374,6 +1374,83 @@ def _grade_prop(desc, all_box):
     return "won" if best < line else "lost"
 
 
+_MLB_UMP_TILT = {
+    "angel hernandez": ("under", "Tight zone, walks-heavy, runs scarce"),
+    "country joe west": ("under", "Old-school wide zone but slow pace, runs cap"),
+    "joe west": ("under", "Old-school wide zone but slow pace, runs cap"),
+    "phil cuzzi": ("over", "Inconsistent zone, walks + offense inflate"),
+    "ron kulpa": ("over", "Hitter-friendly bottom of zone"),
+    "doug eddings": ("over", "Wide horizontal zone, more contact + scoring"),
+    "laz diaz": ("over", "Generous zone but high BB% on edges"),
+    "lance barksdale": ("under", "Pitcher-friendly, suppresses runs"),
+    "dan iassogna": ("under", "Tight, consistent - low-scoring lean"),
+    "alfonso marquez": ("over", "Slightly hitter-friendly zone"),
+    "jordan baker": ("under", "Big strike zone vs RHB, runs down"),
+    "mark wegner": ("over", "Smaller zone, more walks, more runs"),
+    "tripp gibson": ("over", "Above-avg run environment"),
+    "bill miller": ("under", "Veteran tight zone, low BB%"),
+    "ted barrett": ("under", "Crew chief, pitcher-tilt"),
+    "carlos torres": ("over", "Newer ump, generous low strike misses"),
+    "pat hoberg": ("under", "Most accurate ump in MLB - books price it true"),
+    "edwin moscoso": ("over", "Inconsistent low zone, walks up"),
+    "junior valentine": ("over", "Wide zone but high BB%"),
+    "ryan additon": ("under", "Tight, low-error - runs suppressed"),
+    "nick mahrley": ("over", "Wider zone but inconsistent edges"),
+    "chris segal": ("under", "Pitcher-friendly outside corner"),
+    "adam hamari": ("over", "Slight hitter tilt"),
+    "vic carapazza": ("under", "Tight low strike, runs cap"),
+    "mike estabrook": ("over", "Above-avg run env, especially totals"),
+}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_mlb_ump(date_iso, away_abbr, home_abbr):
+    """Return (ump_name, tilt, note) or None if unavailable."""
+    try:
+        ymd = date_iso.replace("-", "")
+        url = (
+            "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/"
+            f"scoreboard?dates={ymd}"
+        )
+        r = requests.get(url, timeout=8)
+        if r.status_code != 200:
+            return None
+        events = (r.json() or {}).get("events") or []
+    except Exception:
+        return None
+    target = None
+    away_l = (away_abbr or "").lower()
+    home_l = (home_abbr or "").lower()
+    for ev in events:
+        names = (ev.get("shortName") or "").lower()
+        if (away_l and away_l in names) or (home_l and home_l in names):
+            target = ev
+            break
+    if not target:
+        return None
+    try:
+        sr = requests.get(
+            "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/"
+            f"summary?event={target.get('id')}",
+            timeout=8,
+        )
+        if sr.status_code != 200:
+            return None
+        gi = (sr.json() or {}).get("gameInfo") or {}
+        for off in gi.get("officials") or []:
+            pos = ((off.get("position") or {}).get("displayName") or "").lower()
+            if "home" in pos or "plate" in pos:
+                nm = off.get("displayName") or off.get("fullName") or ""
+                if nm:
+                    tilt = _MLB_UMP_TILT.get(nm.lower())
+                    if tilt:
+                        return (nm, tilt[0], tilt[1])
+                    return (nm, "neutral", "No strong historical tilt")
+    except Exception:
+        return None
+    return None
+
+
 def auto_grade_prop_bets(open_bets, active_leagues):
     graded = {"won": 0, "lost": 0, "push": 0, "skipped": 0, "total": 0}
     box_by_lg_date = {}
@@ -2140,6 +2217,90 @@ st.markdown(
 .edge-score-card .st { color:#F59E0B; font-size:.7rem; margin-top:3px; }
 .edge-score-card.live { border-color: rgba(16,185,129,.55); }
 .edge-score-card.live .st { color:#10B981; }
+
+/* ---- Money rain (#2) ---- */
+.edge-money-rain {
+  position: fixed; inset: 0; pointer-events: none; z-index: 9998;
+  overflow: hidden;
+}
+.edge-money-rain .bill {
+  position: absolute; top: -60px; font-size: 32px;
+  animation: edgeFall linear forwards;
+  filter: drop-shadow(0 4px 6px rgba(0,0,0,.4));
+}
+@keyframes edgeFall {
+  0%   { transform: translateY(-60px) rotate(0deg); opacity: 0; }
+  10%  { opacity: 1; }
+  90%  { opacity: 1; }
+  100% { transform: translateY(110vh) rotate(540deg); opacity: 0; }
+}
+.edge-money-banner {
+  position: fixed; top: 22%; left: 50%; transform: translateX(-50%);
+  z-index: 9999; pointer-events: none;
+  font-family: "Bebas Neue", "Oswald", sans-serif;
+  font-size: 56px; letter-spacing: .12em; color: #10B981;
+  text-shadow: 0 0 30px rgba(16,185,129,.7), 0 4px 14px rgba(0,0,0,.6);
+  animation: edgeBannerPop 2.6s ease-out forwards;
+}
+@keyframes edgeBannerPop {
+  0%   { transform: translate(-50%, -20px) scale(.6); opacity: 0; }
+  20%  { transform: translate(-50%, 0) scale(1.05); opacity: 1; }
+  85%  { transform: translate(-50%, 0) scale(1); opacity: 1; }
+  100% { transform: translate(-50%, -10px) scale(.95); opacity: 0; }
+}
+
+/* ---- Fight card (#4) ---- */
+.edge-fight-card {
+  position: relative;
+  background: radial-gradient(circle at 50% 0%, rgba(220,38,38,.28), rgba(0,0,0,0) 60%),
+              linear-gradient(180deg, #1a0a0a, #0a0a0a);
+  border: 2px solid #DC2626;
+  border-radius: 14px;
+  padding: 18px 20px 16px;
+  margin: 8px 0 18px;
+  box-shadow: 0 0 40px rgba(220,38,38,.18) inset, 0 12px 30px rgba(0,0,0,.5);
+}
+.edge-fight-banner {
+  position: absolute; top: -12px; left: 50%; transform: translateX(-50%);
+  background: #DC2626; color: #fff;
+  font-family: "Bebas Neue", "Oswald", sans-serif;
+  letter-spacing: .25em; font-size: .8rem;
+  padding: 4px 14px; border-radius: 4px;
+}
+.edge-fight-grid {
+  display: grid; grid-template-columns: 1fr auto 1fr; gap: 14px;
+  align-items: center; margin-top: 10px;
+}
+.edge-fight-side { text-align: center; }
+.edge-fight-side .nm {
+  font-family: "Bebas Neue", "Oswald", sans-serif;
+  font-size: 1.9rem; letter-spacing: .06em; color:#F3F4F6;
+  text-shadow: 0 2px 0 rgba(0,0,0,.6);
+}
+.edge-fight-side .rec { color:#9CA3AF; font-size:.78rem; margin-top:2px; }
+.edge-fight-side .ml { color:#F59E0B; font-weight:700; margin-top:6px;
+  font-variant-numeric: tabular-nums; }
+.edge-fight-vs {
+  font-family: "Bebas Neue", "Oswald", sans-serif;
+  font-size: 2.6rem; color:#DC2626;
+  text-shadow: 0 0 18px rgba(220,38,38,.6);
+}
+.edge-fight-tot {
+  text-align:center; color:#9CA3AF; margin-top:10px;
+  font-size:.78rem; letter-spacing:.08em; text-transform:uppercase;
+}
+
+/* ---- Ump factor (#67) ---- */
+.edge-ump {
+  display:inline-flex; align-items:center; gap:8px;
+  background: rgba(245,158,11,.08);
+  border: 1px solid rgba(245,158,11,.3);
+  padding: 4px 10px; border-radius: 999px;
+  font-size: .76rem; color:#F59E0B; margin: 4px 0;
+}
+.edge-ump .tilt-over  { color:#10B981; font-weight:700; }
+.edge-ump .tilt-under { color:#DC2626; font-weight:700; }
+.edge-ump .tilt-neut  { color:#9CA3AF; font-weight:700; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -2174,6 +2335,27 @@ if not st.session_state.get("edge_user"):
             "something only you know - lose the PIN, lose access to that book."
         )
     st.stop()
+
+# ---- Money rain renderer (#2) ----
+if st.session_state.pop("money_rain", False):
+    import random as _rng
+    _bills = []
+    for i in range(34):
+        _left = _rng.randint(0, 100)
+        _dur = round(_rng.uniform(2.4, 4.4), 2)
+        _delay = round(_rng.uniform(0, 1.6), 2)
+        _emoji = _rng.choice(["💵", "💰", "💸", "🤑", "💵", "💵"])
+        _bills.append(
+            f"<div class='bill' style='left:{_left}vw;"
+            f"animation-duration:{_dur}s;animation-delay:{_delay}s'>"
+            f"{_emoji}</div>"
+        )
+    _label = st.session_state.pop("money_rain_label", "BIG WIN")
+    st.markdown(
+        f"<div class='edge-money-banner'>{_label}</div>"
+        f"<div class='edge-money-rain'>" + "".join(_bills) + "</div>",
+        unsafe_allow_html=True,
+    )
 
 if not st.session_state.get("splash_shown"):
     st.session_state["splash_shown"] = True
@@ -3012,6 +3194,71 @@ with tab_board:
         st.warning(warn)
     if not events:
         st.info("No events on the board.")
+
+    # ---- Fight Card: highest-edge marquee matchup (#4) ----
+    _best_ev = None
+    _best_edge = -1e9
+    _best_pick_label = ""
+    _best_price = None
+    _best_total = None
+    for _ev in events or []:
+        for _m in _ev.markets:
+            for _oc in _m.outcomes:
+                if _oc.edge_bps is not None and _oc.edge_bps > _best_edge:
+                    _best_edge = _oc.edge_bps
+                    _best_ev = _ev
+                    _best_pick_label = _pick_label(_oc, _m.type)
+                    _best_price = _oc.best.price_american if _oc.best else None
+                if "total" in (_m.type or "").lower() and _oc.best:
+                    try:
+                        _line = getattr(_oc, "line", None) or getattr(_oc, "point", None)
+                        if _line:
+                            _best_total = _line
+                    except Exception:
+                        pass
+    if _best_ev and _best_edge > 0:
+        _ml_a = _ml_h = "-"
+        for _m in _best_ev.markets:
+            if "moneyline" in (_m.type or "").lower() or _m.type.lower() == "h2h":
+                for _oc in _m.outcomes:
+                    if _oc.best:
+                        nm = (_oc.name or "").lower()
+                        if (_best_ev.away or "").lower() in nm:
+                            _ml_a = format_american(_oc.best.price_american)
+                        elif (_best_ev.home or "").lower() in nm:
+                            _ml_h = format_american(_oc.best.price_american)
+        _tot_html = (
+            f"Total {_best_total} &nbsp;&middot;&nbsp; "
+            if _best_total else ""
+        )
+        _price_html = (
+            format_american(_best_price) if _best_price is not None else "-"
+        )
+        st.markdown(
+            f"""
+<div class='edge-fight-card'>
+  <div class='edge-fight-banner'>MARQUEE - TONIGHT</div>
+  <div class='edge-fight-grid'>
+    <div class='edge-fight-side'>
+      <div class='nm'>{_best_ev.away}</div>
+      <div class='rec'>AWAY</div>
+      <div class='ml'>ML {_ml_a}</div>
+    </div>
+    <div class='edge-fight-vs'>VS</div>
+    <div class='edge-fight-side'>
+      <div class='nm'>{_best_ev.home}</div>
+      <div class='rec'>HOME</div>
+      <div class='ml'>ML {_ml_h}</div>
+    </div>
+  </div>
+  <div class='edge-fight-tot'>
+    {_tot_html}Edge play: <b style='color:#10B981'>{_best_pick_label}</b>
+    @ {_price_html} &nbsp;&middot;&nbsp; {format_bps(_best_edge)}
+  </div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
     for ev in events:
         with st.container(border=True):
             title = (
@@ -3022,6 +3269,31 @@ with tab_board:
             inj_html = render_injuries_for_game(league_id, ev.away, ev.home)
             if inj_html:
                 st.markdown(inj_html, unsafe_allow_html=True)
+            if league_id == "MLB":
+                try:
+                    _ump_date = (ev.start or "")[:10] or datetime.now(
+                        timezone.utc
+                    ).strftime("%Y-%m-%d")
+                    _ump = fetch_mlb_ump(_ump_date, ev.away, ev.home)
+                except Exception:
+                    _ump = None
+                if _ump:
+                    _nm, _tilt, _note = _ump
+                    _t_cls = {
+                        "over": "tilt-over",
+                        "under": "tilt-under",
+                    }.get(_tilt, "tilt-neut")
+                    _t_label = {
+                        "over": "OVER tilt",
+                        "under": "UNDER tilt",
+                    }.get(_tilt, "Neutral")
+                    st.markdown(
+                        f"<div class='edge-ump'>HP Ump <b>{_nm}</b> "
+                        f"&middot; <span class='{_t_cls}'>{_t_label}</span> "
+                        f"&middot; <span style='color:#9CA3AF'>{_note}</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
             for m in ev.markets:
                 st.caption(m.type)
                 rows_t = []
@@ -3054,9 +3326,141 @@ with tab_board:
                 html += "</table>"
                 st.markdown(html, unsafe_allow_html=True)
 
+@st.cache_data(ttl=120, show_spinner=False)
+def _h2h_leaderboard():
+    """Query unscoped bets to compute per-user ROI / win% / streak."""
+    _ensure_schema()
+    conn = db_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT usr, status, stake, to_win, settled_at FROM bets "
+        "WHERE status IN ('won','lost','push')"
+    )
+    rows = cur.fetchall()
+    conn.close()
+    by_user = {}
+    for usr, status, stake, to_win, settled_at in rows:
+        u = usr or "default"
+        d = by_user.setdefault(
+            u, {"won": 0, "lost": 0, "push": 0, "wagered": 0.0, "pnl": 0.0,
+                 "events": []},
+        )
+        d[status] = d.get(status, 0) + 1
+        try:
+            stk = float(stake or 0)
+            tw = float(to_win or 0)
+        except Exception:
+            stk = tw = 0
+        d["wagered"] += stk
+        if status == "won":
+            d["pnl"] += tw
+        elif status == "lost":
+            d["pnl"] -= stk
+        d["events"].append((settled_at or "", status))
+    out = []
+    for u, d in by_user.items():
+        total = d["won"] + d["lost"] + d["push"]
+        if total < 3:
+            continue
+        hit = (d["won"] / max(1, d["won"] + d["lost"])) * 100
+        roi = (d["pnl"] / d["wagered"] * 100) if d["wagered"] > 0 else 0
+        d["events"].sort(key=lambda x: x[0], reverse=True)
+        streak_kind = streak_n = None
+        for _, st_ in d["events"]:
+            if st_ == "push":
+                continue
+            if streak_kind is None:
+                streak_kind = st_
+                streak_n = 1
+            elif st_ == streak_kind:
+                streak_n += 1
+            else:
+                break
+        name = u.split("-")[0] if "-" in u else u
+        out.append({
+            "user": name, "uid": u, "total": total, "hit_pct": hit,
+            "pnl": d["pnl"], "roi": roi, "wagered": d["wagered"],
+            "streak": (streak_kind or "-", streak_n or 0),
+        })
+    out.sort(key=lambda r: r["roi"], reverse=True)
+    return out
+
+
 with tab_bank:
     bets = db_load_bets()
     today = datetime.now(timezone.utc).date().isoformat()
+
+    # ---- H2H Leaderboard (#27) ----
+    with st.expander("Leaderboard - all users on this book", expanded=False):
+        lb = _h2h_leaderboard()
+        if not lb:
+            st.info(
+                "Need at least 3 settled bets per user to rank. Settle some "
+                "and refresh."
+            )
+        else:
+            _me_uid = _current_user()
+            html_rows = [
+                "<table style='width:100%;font-size:.92rem;border-collapse:collapse'>"
+                "<tr style='color:#9CA3AF;text-align:left;border-bottom:"
+                "1px solid rgba(255,255,255,.08)'>"
+                "<th style='padding:6px 8px'>#</th>"
+                "<th style='padding:6px 8px'>User</th>"
+                "<th style='padding:6px 8px'>Bets</th>"
+                "<th style='padding:6px 8px'>Hit %</th>"
+                "<th style='padding:6px 8px'>P&amp;L</th>"
+                "<th style='padding:6px 8px'>ROI</th>"
+                "<th style='padding:6px 8px'>Streak</th>"
+                "</tr>"
+            ]
+            for i, r in enumerate(lb[:25], 1):
+                pnl_color = (
+                    GREEN if r["pnl"] > 0
+                    else (RED if r["pnl"] < 0 else MUTED)
+                )
+                roi_color = (
+                    GREEN if r["roi"] > 0
+                    else (RED if r["roi"] < 0 else MUTED)
+                )
+                me = r["uid"] == _me_uid
+                row_bg = (
+                    "background:rgba(220,38,38,.08);" if me else ""
+                )
+                me_tag = (
+                    " <span style='color:#DC2626;font-size:.7rem'>YOU</span>"
+                    if me else ""
+                )
+                sk_kind, sk_n = r["streak"]
+                sk_color = GREEN if sk_kind == "won" else (
+                    RED if sk_kind == "lost" else MUTED
+                )
+                sk_label = (
+                    f"<span style='color:{sk_color};font-weight:700'>"
+                    f"{sk_n}{(sk_kind or '')[0].upper()}</span>"
+                    if sk_kind and sk_kind != "-"
+                    else "<span style='color:#6B7280'>-</span>"
+                )
+                html_rows.append(
+                    f"<tr style='{row_bg}border-bottom:1px solid "
+                    f"rgba(255,255,255,.04)'>"
+                    f"<td style='padding:6px 8px;color:#9CA3AF'>{i}</td>"
+                    f"<td style='padding:6px 8px'><b>{r['user']}</b>{me_tag}</td>"
+                    f"<td style='padding:6px 8px'>{r['total']}</td>"
+                    f"<td style='padding:6px 8px'>{r['hit_pct']:.1f}%</td>"
+                    f"<td style='padding:6px 8px;color:{pnl_color};"
+                    f"font-variant-numeric:tabular-nums'>"
+                    f"${r['pnl']:+,.2f}</td>"
+                    f"<td style='padding:6px 8px;color:{roi_color}'>"
+                    f"{r['roi']:+.1f}%</td>"
+                    f"<td style='padding:6px 8px'>{sk_label}</td>"
+                    f"</tr>"
+                )
+            html_rows.append("</table>")
+            st.markdown("".join(html_rows), unsafe_allow_html=True)
+            st.caption(
+                "Leaderboard ranks by ROI (min 3 settled bets). "
+                "Streaks ignore pushes."
+            )
     today_open = [
         b for b in bets if b["status"] == "open" and b["date"] == today
     ]
@@ -3492,6 +3896,14 @@ with tab_bank:
         if cols[5].button("Win", key=f"w{b['id']}"):
             db_settle_bet(b["id"], "won")
             st.session_state["fx"] = "win"
+            try:
+                if float(b.get("to_win", 0)) >= 3.0 * float(min_bet):
+                    st.session_state["money_rain"] = True
+                    st.session_state["money_rain_label"] = (
+                        f"+${float(b['to_win']):,.0f} CASHED"
+                    )
+            except Exception:
+                pass
             st.rerun()
         if cols[6].button("Loss", key=f"l{b['id']}"):
             db_settle_bet(b["id"], "lost")
