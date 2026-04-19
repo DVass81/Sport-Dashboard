@@ -1374,6 +1374,145 @@ def _grade_prop(desc, all_box):
     return "won" if best < line else "lost"
 
 
+_NBA_REF_TILT = {
+    "scott foster": ("under", "Slow whistle, low FT rate, road-team grim"),
+    "tony brothers": ("under", "Tight, tech-happy, slows pace"),
+    "marc davis": ("over", "Lets game flow, more possessions"),
+    "james capers": ("under", "Tight on physicality, bonus quick"),
+    "eric lewis": ("over", "Loose, plenty of and-ones"),
+    "sean wright": ("over", "Hitter-friendly equivalent - high FT"),
+    "tyler ford": ("over", "Above-avg pace, FT rate up"),
+    "zach zarba": ("under", "Veteran tight crew chief"),
+    "ed malloy": ("under", "Slows offense, tech-prone"),
+    "kane fitzgerald": ("over", "Calls heavy contact - FT spike"),
+    "courtney kirkland": ("over", "Lets bigs play, scoring up"),
+    "tre maddox": ("over", "Generous on perimeter contact"),
+    "david guthrie": ("under", "Veteran, suppresses pace slightly"),
+    "josh tiven": ("under", "Tight grip, runs cap"),
+    "mark lindsay": ("over", "Above-avg total bias"),
+}
+
+_NFL_REF_TILT = {
+    "carl cheffers": ("under", "Low penalty rate, clock keeps moving"),
+    "brad allen": ("over", "Flag-happy crew, drives extended"),
+    "shawn hochuli": ("under", "Tight DPI calls but few overall flags"),
+    "bill vinovich": ("over", "Pass-friendly, scoring above avg"),
+    "clete blakeman": ("over", "Lots of yardage penalties"),
+    "ron torbert": ("under", "Low-flag crew, defense-leaning"),
+    "tony corrente": ("over", "High flags, drives extended"),
+    "jerome boger": ("over", "Above-avg penalty yardage"),
+    "alex kemp": ("under", "Lower penalty rate, totals lean under"),
+    "scott novak": ("under", "Quick whistles on offense"),
+    "land clark": ("over", "Loose holding/PI standard"),
+    "craig wrolstad": ("under", "Veteran tight crew"),
+    "adrian hill": ("over", "Defensive holding heavy"),
+    "shawn smith": ("under", "Low-flag, defense-leaning"),
+    "brad rogers": ("over", "Above avg flags, drives extended"),
+}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_ref_crew(league, date_iso, away, home):
+    """Return (ref_name, tilt, note) or None. league in {NBA, NFL}."""
+    espn_lg = {
+        "NBA": "basketball/nba",
+        "NFL": "football/nfl",
+    }
+    path = espn_lg.get(league)
+    if not path:
+        return None
+    try:
+        ymd = date_iso.replace("-", "")
+        url = (
+            f"https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
+            f"?dates={ymd}"
+        )
+        r = requests.get(url, timeout=8)
+        if r.status_code != 200:
+            return None
+        events = (r.json() or {}).get("events") or []
+    except Exception:
+        return None
+    target = None
+    aw_l = (away or "").lower()
+    hm_l = (home or "").lower()
+    for ev in events:
+        nm = (ev.get("shortName") or "").lower()
+        if (aw_l and aw_l in nm) or (hm_l and hm_l in nm):
+            target = ev
+            break
+    if not target:
+        return None
+    try:
+        sr = requests.get(
+            f"https://site.api.espn.com/apis/site/v2/sports/{path}/summary"
+            f"?event={target.get('id')}",
+            timeout=8,
+        )
+        if sr.status_code != 200:
+            return None
+        gi = (sr.json() or {}).get("gameInfo") or {}
+        tilt_dict = _NBA_REF_TILT if league == "NBA" else _NFL_REF_TILT
+        chief = None
+        for off in gi.get("officials") or []:
+            pos = (
+                (off.get("position") or {}).get("displayName") or ""
+            ).lower()
+            nm_full = off.get("displayName") or off.get("fullName") or ""
+            if league == "NFL" and "referee" in pos:
+                chief = nm_full
+                break
+            if league == "NBA" and ("crew chief" in pos or "chief" in pos):
+                chief = nm_full
+                break
+            if not chief and nm_full:
+                chief = nm_full
+        if not chief:
+            return None
+        tilt = tilt_dict.get(chief.lower())
+        if tilt:
+            return (chief, tilt[0], tilt[1])
+        return (chief, "neutral", "No strong historical tilt logged")
+    except Exception:
+        return None
+
+
+_NBA_PACE_2024 = {
+    "MEM": 103.5, "WAS": 103.0, "ATL": 102.6, "IND": 102.4, "CHI": 102.0,
+    "OKC": 101.9, "SAS": 101.7, "DET": 101.4, "MIL": 101.0, "GSW": 100.8,
+    "HOU": 100.7, "LAL": 100.5, "SAC": 100.3, "UTA": 100.1, "POR": 99.8,
+    "MIN": 99.5, "BOS": 99.2, "PHI": 99.0, "TOR": 98.7, "DAL": 98.5,
+    "NOP": 98.3, "BKN": 98.0, "ORL": 97.6, "PHX": 97.3, "CHA": 97.0,
+    "MIA": 96.7, "LAC": 96.4, "CLE": 96.0, "DEN": 95.6, "NYK": 95.0,
+}
+_NBA_LEAGUE_PACE_AVG = 99.5
+
+
+def _nba_pace_for(team_name):
+    if not team_name:
+        return None
+    t = team_name.upper()
+    if t in _NBA_PACE_2024:
+        return _NBA_PACE_2024[t]
+    aliases = {
+        "LAKERS": "LAL", "WARRIORS": "GSW", "CELTICS": "BOS",
+        "KNICKS": "NYK", "NETS": "BKN", "76ERS": "PHI", "SIXERS": "PHI",
+        "BUCKS": "MIL", "BULLS": "CHI", "HAWKS": "ATL", "HEAT": "MIA",
+        "MAGIC": "ORL", "PACERS": "IND", "PISTONS": "DET", "RAPTORS": "TOR",
+        "WIZARDS": "WAS", "CAVS": "CLE", "CAVALIERS": "CLE",
+        "HORNETS": "CHA", "GRIZZLIES": "MEM", "MAVS": "DAL",
+        "MAVERICKS": "DAL", "ROCKETS": "HOU", "SPURS": "SAS",
+        "PELICANS": "NOP", "NUGGETS": "DEN", "JAZZ": "UTA",
+        "TIMBERWOLVES": "MIN", "WOLVES": "MIN", "THUNDER": "OKC",
+        "BLAZERS": "POR", "TRAIL BLAZERS": "POR", "KINGS": "SAC",
+        "SUNS": "PHX", "CLIPPERS": "LAC",
+    }
+    for k, v in aliases.items():
+        if k in t:
+            return _NBA_PACE_2024.get(v)
+    return None
+
+
 _MLB_UMP_TILT = {
     "angel hernandez": ("under", "Tight zone, walks-heavy, runs scarce"),
     "country joe west": ("under", "Old-school wide zone but slow pace, runs cap"),
@@ -2290,6 +2429,111 @@ st.markdown(
   font-size:.78rem; letter-spacing:.08em; text-transform:uppercase;
 }
 
+/* ---- Lava lamp blobs (#22) ---- */
+.edge-lava {
+  position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  overflow: hidden; filter: blur(48px) saturate(140%);
+  opacity: .55;
+}
+.edge-lava .blob {
+  position: absolute; border-radius: 50%;
+  mix-blend-mode: screen;
+  animation: edgeLava 22s ease-in-out infinite;
+}
+.edge-lava .b1 { width: 520px; height: 520px; top: -120px; left: -80px;
+  animation-duration: 26s; }
+.edge-lava .b2 { width: 420px; height: 420px; top: 30%; left: 55%;
+  animation-duration: 32s; animation-delay: -7s; }
+.edge-lava .b3 { width: 360px; height: 360px; top: 65%; left: 8%;
+  animation-duration: 38s; animation-delay: -14s; }
+.edge-lava .b4 { width: 300px; height: 300px; top: 8%; left: 70%;
+  animation-duration: 30s; animation-delay: -3s; }
+@keyframes edgeLava {
+  0%   { transform: translate(0,0) scale(1); }
+  33%  { transform: translate(40vw, 12vh) scale(1.15); }
+  66%  { transform: translate(-12vw, 30vh) scale(.85); }
+  100% { transform: translate(0,0) scale(1); }
+}
+
+/* ---- Lottery ball tumbler (#21) ---- */
+.edge-tumbler-wrap {
+  position: fixed; inset: 0; z-index: 9997; pointer-events: none;
+  display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(circle at center, rgba(0,0,0,.55), rgba(0,0,0,.85));
+  animation: edgeTumblerFade 3.4s ease-out forwards;
+}
+@keyframes edgeTumblerFade {
+  0% { opacity: 0; }
+  10% { opacity: 1; }
+  85% { opacity: 1; }
+  100% { opacity: 0; }
+}
+.edge-tumbler {
+  position: relative; width: 360px; height: 360px;
+  border-radius: 50%;
+  border: 6px solid rgba(220,38,38,.5);
+  background: radial-gradient(circle at 30% 30%, rgba(255,255,255,.06), rgba(0,0,0,.7));
+  box-shadow: 0 0 60px rgba(220,38,38,.4), inset 0 0 40px rgba(0,0,0,.6);
+  overflow: hidden;
+}
+.edge-tumbler .ball {
+  position: absolute; width: 56px; height: 56px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-family: "Bebas Neue", "Oswald", sans-serif;
+  font-size: 1.2rem; color: #1a0a0a;
+  box-shadow: inset -6px -6px 12px rgba(0,0,0,.35), 0 4px 8px rgba(0,0,0,.5);
+  animation: edgeBall 2.6s ease-in-out infinite;
+}
+.edge-tumbler .ball.b-red    { background: radial-gradient(circle at 30% 30%, #ff7e7e, #DC2626); color:#fff; }
+.edge-tumbler .ball.b-amber  { background: radial-gradient(circle at 30% 30%, #ffd680, #F59E0B); }
+.edge-tumbler .ball.b-green  { background: radial-gradient(circle at 30% 30%, #8af0c2, #10B981); color:#fff; }
+.edge-tumbler .ball.b-blue   { background: radial-gradient(circle at 30% 30%, #aac6ff, #3B82F6); color:#fff; }
+.edge-tumbler .ball.b-white  { background: radial-gradient(circle at 30% 30%, #ffffff, #d1d5db); }
+@keyframes edgeBall {
+  0%   { transform: translate(120px, 120px) rotate(0deg); }
+  25%  { transform: translate(40px, 240px) rotate(180deg); }
+  50%  { transform: translate(220px, 200px) rotate(360deg); }
+  75%  { transform: translate(220px, 60px) rotate(540deg); }
+  100% { transform: translate(120px, 120px) rotate(720deg); }
+}
+.edge-tumbler-label {
+  position: absolute; bottom: -54px; left: 50%; transform: translateX(-50%);
+  font-family: "Bebas Neue", "Oswald", sans-serif;
+  font-size: 1.5rem; letter-spacing: .15em; color: #F59E0B;
+  text-shadow: 0 0 18px rgba(245,158,11,.7);
+}
+
+/* ---- Ref crew + pace pills (#68 #70) ---- */
+.edge-ref {
+  display:inline-flex; align-items:center; gap:8px;
+  background: rgba(59,130,246,.08);
+  border: 1px solid rgba(59,130,246,.3);
+  padding: 4px 10px; border-radius: 999px;
+  font-size: .76rem; color:#3B82F6; margin: 4px 6px 4px 0;
+}
+.edge-pace {
+  display:inline-flex; align-items:center; gap:6px;
+  background: rgba(16,185,129,.08);
+  border: 1px solid rgba(16,185,129,.3);
+  padding: 4px 10px; border-radius: 999px;
+  font-size: .76rem; color:#10B981; margin: 4px 6px 4px 0;
+}
+.edge-pace.fast { color:#10B981; border-color: rgba(16,185,129,.5); }
+.edge-pace.slow { color:#DC2626; border-color: rgba(220,38,38,.4);
+  background: rgba(220,38,38,.07); }
+.edge-pace.avg  { color:#9CA3AF; border-color: rgba(156,163,175,.3);
+  background: rgba(156,163,175,.06); }
+.edge-pace .bar {
+  display:inline-block; width:60px; height:5px; border-radius:3px;
+  background: linear-gradient(90deg,#DC2626,#F59E0B,#10B981);
+  position: relative;
+}
+.edge-pace .bar::after {
+  content:''; position:absolute; top:-3px; width:3px; height:11px;
+  background:#F3F4F6; border-radius:2px;
+}
+
 /* ---- Ump factor (#67) ---- */
 .edge-ump {
   display:inline-flex; align-items:center; gap:8px;
@@ -2335,6 +2579,52 @@ if not st.session_state.get("edge_user"):
             "something only you know - lose the PIN, lose access to that book."
         )
     st.stop()
+
+# ---- Lava lamp background (#22) ----
+_pulse = float(st.session_state.get("edge_pulse", 0.0))
+if _pulse >= 150:
+    _lava_palette = ("#10B981", "#34D399", "#F59E0B", "#DC2626")
+elif _pulse >= 50:
+    _lava_palette = ("#F59E0B", "#DC2626", "#3B82F6", "#10B981")
+elif _pulse <= -25:
+    _lava_palette = ("#7F1D1D", "#DC2626", "#1F2937", "#1F2937")
+else:
+    _lava_palette = ("#1F2937", "#374151", "#1F2937", "#3B82F6")
+st.markdown(
+    f"<div class='edge-lava'>"
+    f"<div class='blob b1' style='background:{_lava_palette[0]}'></div>"
+    f"<div class='blob b2' style='background:{_lava_palette[1]}'></div>"
+    f"<div class='blob b3' style='background:{_lava_palette[2]}'></div>"
+    f"<div class='blob b4' style='background:{_lava_palette[3]}'></div>"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+
+# ---- Lottery ball tumbler renderer (#21) ----
+if st.session_state.pop("tumbler", False):
+    import random as _trng
+    _legs_lbl = st.session_state.pop("tumbler_labels", []) or []
+    _odds_lbl = st.session_state.pop("tumbler_odds", "")
+    _colors = ["b-red", "b-amber", "b-green", "b-blue", "b-white"]
+    _balls = []
+    for i, lbl in enumerate(_legs_lbl[:8]):
+        _c = _colors[i % len(_colors)]
+        _delay = round(-_trng.uniform(0, 2.4), 2)
+        _initial_x = _trng.randint(40, 260)
+        _initial_y = _trng.randint(40, 260)
+        _balls.append(
+            f"<div class='ball {_c}' style='top:{_initial_y}px;"
+            f"left:{_initial_x}px;animation-delay:{_delay}s'>"
+            f"{(lbl or '?')[:3].upper()}</div>"
+        )
+    if _balls:
+        st.markdown(
+            f"<div class='edge-tumbler-wrap'>"
+            f"<div class='edge-tumbler'>" + "".join(_balls) + "</div>"
+            f"<div class='edge-tumbler-label'>{_odds_lbl}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
 # ---- Money rain renderer (#2) ----
 if st.session_state.pop("money_rain", False):
@@ -3124,6 +3414,15 @@ with tab_parlay:
             )
 
             if st.button("Log this parlay", type="primary"):
+                st.session_state["tumbler"] = True
+                st.session_state["tumbler_labels"] = [
+                    (l.get("pick") or l.get("matchup") or "?")[:3]
+                    for l in legs
+                ]
+                st.session_state["tumbler_odds"] = (
+                    f"{format_american(combined_am)} - "
+                    f"PAYS ${profit:,.0f}"
+                )
                 desc = " + ".join(
                     f"{l['matchup'][:18]} {l['pick']}" for l in legs
                 )
@@ -3194,6 +3493,20 @@ with tab_board:
         st.warning(warn)
     if not events:
         st.info("No events on the board.")
+
+    # ---- Update lava-lamp pulse from current best edge (#22) ----
+    try:
+        _max_e = max(
+            (
+                _oc.edge_bps for _ev in (events or [])
+                for _m in _ev.markets for _oc in _m.outcomes
+                if _oc.edge_bps is not None
+            ),
+            default=0,
+        )
+        st.session_state["edge_pulse"] = float(_max_e)
+    except Exception:
+        pass
 
     # ---- Fight Card: highest-edge marquee matchup (#4) ----
     _best_ev = None
@@ -3269,6 +3582,58 @@ with tab_board:
             inj_html = render_injuries_for_game(league_id, ev.away, ev.home)
             if inj_html:
                 st.markdown(inj_html, unsafe_allow_html=True)
+            _meta_pills = []
+            if league_id in ("NBA", "NFL"):
+                try:
+                    _rc_date = (ev.start or "")[:10] or datetime.now(
+                        timezone.utc
+                    ).strftime("%Y-%m-%d")
+                    _ref = fetch_ref_crew(
+                        league_id, _rc_date, ev.away, ev.home,
+                    )
+                except Exception:
+                    _ref = None
+                if _ref:
+                    _rn, _rt, _rnote = _ref
+                    _t_cls = {
+                        "over": "tilt-over", "under": "tilt-under",
+                    }.get(_rt, "tilt-neut")
+                    _t_label = {
+                        "over": "OVER tilt", "under": "UNDER tilt",
+                    }.get(_rt, "Neutral")
+                    _meta_pills.append(
+                        f"<span class='edge-ref'>"
+                        f"{'Ref' if league_id == 'NFL' else 'Crew Chief'} "
+                        f"<b>{_rn}</b> &middot; "
+                        f"<span class='{_t_cls}'>{_t_label}</span> &middot; "
+                        f"<span style='color:#9CA3AF'>{_rnote}</span>"
+                        f"</span>"
+                    )
+            if league_id == "NBA":
+                _pa = _nba_pace_for(ev.away)
+                _ph = _nba_pace_for(ev.home)
+                if _pa and _ph:
+                    _combined = (_pa + _ph) / 2.0
+                    _delta = _combined - _NBA_LEAGUE_PACE_AVG
+                    if _delta >= 1.5:
+                        _pcls, _plbl = "fast", "FAST pace"
+                    elif _delta <= -1.5:
+                        _pcls, _plbl = "slow", "SLOW pace"
+                    else:
+                        _pcls, _plbl = "avg", "Avg pace"
+                    _meta_pills.append(
+                        f"<span class='edge-pace {_pcls}'>"
+                        f"{_plbl} &middot; "
+                        f"<b>{_combined:.1f}</b> poss/g "
+                        f"({_delta:+.1f} vs lg) &middot; "
+                        f"<span class='bar'></span>"
+                        f"</span>"
+                    )
+            if _meta_pills:
+                st.markdown(
+                    "<div>" + "".join(_meta_pills) + "</div>",
+                    unsafe_allow_html=True,
+                )
             if league_id == "MLB":
                 try:
                     _ump_date = (ev.start or "")[:10] or datetime.now(
