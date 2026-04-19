@@ -256,18 +256,18 @@ def render_quick_links():
     st.markdown('<div class="section-title">Quick Sportsbook Links</div>', unsafe_allow_html=True)
     cols = st.columns(4)
     books = [
-        ("DraftKings", "🟩"),
-        ("FanDuel", "🟦"),
-        ("Bet365", "🟢"),
-        ("PrizePicks", "🟧"),
+        ("DraftKings", "🟩", "Fastest major-book line check"),
+        ("FanDuel", "🟦", "Popular market comparison book"),
+        ("Bet365", "🟢", "Strong alt-line shopping option"),
+        ("PrizePicks", "🟧", "DFS-style prop board access"),
     ]
-    for col, (book, icon) in zip(cols, books):
+    for col, (book, icon, sub) in zip(cols, books):
         with col:
             st.markdown(
                 f"""
                 <div class="book-link-card">
                     <div class="book-link-title">{icon} {book}</div>
-                    <div class="book-link-sub">Open the sportsbook site fast</div>
+                    <div class="book-link-sub">{sub}</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -278,7 +278,46 @@ def render_quick_links():
                 st.markdown(f"[Open {book}]({BOOK_URLS[book]})")
 
 
+def get_same_pick_market_rows(df, row):
+    if df is None or df.empty:
+        return pd.DataFrame()
+    same = df[
+        (df["Event"] == row.get("Event"))
+        & (df["Pick"] == row.get("Pick"))
+        & (df["Market"] == row.get("Market"))
+    ].copy()
+    if same.empty:
+        return same
+    return same.sort_values(["Implied Prob", "Bet Score"], ascending=[True, False]).reset_index(drop=True)
+
+
+
+def build_book_snapshot_html(row, compare_df=None):
+    same = get_same_pick_market_rows(compare_df, row)
+    if same.empty:
+        return "<div class='mini-note'>Only one book is currently quoted for this pick.</div>"
+
+    blocks = []
+    top_book = str(same.iloc[0].get("Sportsbook", ""))
+    for _, r in same.iterrows():
+        is_best = str(r.get("Sportsbook", "")) == top_book
+        status = "Best price" if is_best else "Quoted"
+        extra = "book-best" if is_best else ""
+        blocks.append(
+            f"""
+            <div class="book-quote-card {extra}">
+                <div class="book-quote-top">{r.get('Sportsbook', 'Book')}</div>
+                <div class="book-quote-odds">{r.get('Odds', '—')}</div>
+                <div class="book-quote-sub">{status} · Imp {float(r.get('Implied Prob', 0)):.2f}%</div>
+            </div>
+            """
+        )
+    return "<div class='book-quote-grid'>" + "".join(blocks) + "</div>"
+
+
+
 def build_explain_bet_markdown(row, compare_df=None):
+    same = get_same_pick_market_rows(compare_df, row)
     notes = []
     notes.append(f"**Why the board likes it:** {row.get('Reason', 'No base reason provided.')}")
     notes.append(f"**Current price:** {row.get('Sportsbook', 'Book')} {row.get('Odds', '')} with implied probability {row.get('Implied Prob', 0):.2f}%.")
@@ -286,18 +325,17 @@ def build_explain_bet_markdown(row, compare_df=None):
     notes.append(f"**Score + sizing:** bet score {row.get('Bet Score', 0):.2f}, recommended ${int(row.get('Recommended Bet', 0))}, final allocation ${int(row.get('Final Bet', 0))}.")
     notes.append(f"**Line movement:** previous odds {row.get('Prev Odds', '—')} to current {row.get('Odds', '')}, labeled {row.get('Move Label', 'Flat')} ({row.get('Line Move %', 0):+.2f}%).")
     notes.append(f"**Risk controls:** {row.get('Allocation Status', '—')}. {row.get('Pass Reason', '') or 'No extra pass note; the play fits the current controls.'}")
-    if compare_df is not None and not compare_df.empty:
-        same = compare_df[
-            (compare_df["Event"] == row.get("Event"))
-            & (compare_df["Pick"] == row.get("Pick"))
-            & (compare_df["Market"] == row.get("Market"))
-        ]
-        if not same.empty:
-            comp = same.iloc[0]
+    if not same.empty:
+        best = same.iloc[0]
+        line_gap = float(same["Implied Prob"].max() - same["Implied Prob"].min()) if len(same) > 1 else 0.0
+        notes.append(
+            f"**Best-book context:** best book is {best.get('Sportsbook', '—')} at {best.get('Odds', '—')} with a line gap of {line_gap:.2f}% across {len(same)} books."
+        )
+        if str(best.get('Sportsbook', '')) != str(row.get('Sportsbook', '')):
             notes.append(
-                f"**Best-book context:** best book is {comp.get('Best Sportsbook', '—')} at {comp.get('Best Odds', '—')} with a line gap of {comp.get('Line Gap %', 0):.2f}% across {int(comp.get('Books_Quoting', 0) or 0)} books."
+                f"**Important:** this row is not the best live number right now. The best current price is at **{best.get('Sportsbook', '—')}**."
             )
-    return "\n\n".join(notes)
+TEMP_MARK
 
 
 
@@ -860,6 +898,137 @@ st.markdown(
         background: #dfeeff !important;
         color: #163b68 !important;
     }
+    .book-link-card {
+        background: linear-gradient(135deg, #ffffff 0%, #f3f8ff 100%);
+        border: 1px solid #cfe1f7;
+        border-top: 5px solid #2b73d5;
+        border-radius: 18px;
+        padding: 14px 14px 12px 14px;
+        box-shadow: 0 10px 22px rgba(22, 59, 104, 0.09);
+        min-height: 88px;
+        margin-bottom: 10px;
+    }
+
+    .book-link-title {
+        color: #173b67;
+        font-size: 1.05rem;
+        font-weight: 900;
+        margin-bottom: 6px;
+    }
+
+    .book-link-sub {
+        color: #5b7393;
+        font-size: 0.86rem;
+        font-weight: 600;
+    }
+
+    .badge {
+        display: inline-block;
+        padding: 5px 10px;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-weight: 800;
+        margin: 6px 8px 4px 0;
+        border: 1px solid transparent;
+    }
+
+    .badge-elite { background: #d9edff; color: #0f4d8a; border-color: #b7dafc; }
+    .badge-high { background: #ddf7ea; color: #157347; border-color: #bde7d1; }
+    .badge-medium { background: #fff4d8; color: #8a6100; border-color: #f2e0a8; }
+    .badge-low { background: #eef3f8; color: #5b6f84; border-color: #d9e4ef; }
+    .badge-improving { background: #dff7ea; color: #156f49; border-color: #bbe7cd; }
+    .badge-flat { background: #edf3f9; color: #576f86; border-color: #d6e3ef; }
+    .badge-worse { background: #fde6e8; color: #a53b47; border-color: #f6c5ca; }
+    .badge-new { background: #e7edff; color: #415bb5; border-color: #cbd7ff; }
+    .badge-within { background: #dff3ff; color: #155b9a; border-color: #b8ddfb; }
+    .badge-trimmed { background: #fff1dd; color: #975d00; border-color: #f4dbb0; }
+    .badge-blocked { background: #fde6e8; color: #a53b47; border-color: #f6c5ca; }
+
+    .explain-hero {
+        background: linear-gradient(135deg, #ffffff 0%, #f5f9ff 100%);
+        border: 1px solid #d6e5f6;
+        border-left: 6px solid #2b73d5;
+        border-radius: 18px;
+        padding: 16px 18px;
+        box-shadow: 0 10px 22px rgba(22, 59, 104, 0.08);
+        margin-bottom: 12px;
+    }
+
+    .mini-note {
+        color: #59718f;
+        font-size: 0.88rem;
+        font-weight: 600;
+        margin-top: 8px;
+    }
+
+    .book-quote-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 10px;
+        margin-bottom: 14px;
+    }
+
+    .book-quote-card {
+        background: #ffffff;
+        border: 1px solid #dbe7f5;
+        border-radius: 14px;
+        padding: 12px;
+        box-shadow: 0 6px 16px rgba(22, 59, 104, 0.06);
+    }
+
+    .book-quote-card.book-best {
+        border: 2px solid #2b73d5;
+        background: #f2f8ff;
+    }
+
+    .book-quote-top {
+        color: #173b67;
+        font-size: 0.85rem;
+        font-weight: 800;
+    }
+
+    .book-quote-odds {
+        color: #0f345a;
+        font-size: 1.1rem;
+        font-weight: 900;
+        margin-top: 6px;
+    }
+
+    .book-quote-sub {
+        color: #5d7695;
+        font-size: 0.78rem;
+        font-weight: 700;
+        margin-top: 6px;
+    }
+
+    .explain-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin: 10px 0 12px 0;
+    }
+
+    .explain-stat {
+        background: #ffffff;
+        border: 1px solid #dbe7f5;
+        border-radius: 14px;
+        padding: 12px;
+    }
+
+    .explain-stat-label {
+        color: #647d9a;
+        font-size: 0.78rem;
+        font-weight: 800;
+        text-transform: uppercase;
+    }
+
+    .explain-stat-value {
+        color: #14365c;
+        font-size: 1.08rem;
+        font-weight: 900;
+        margin-top: 6px;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -1235,17 +1404,39 @@ def render_live_dashboard():
                 key="explain_bet_select",
             )
             explained_row = explain_candidates.loc[explain_candidates["Explain Label"] == selected_label].iloc[0]
+            same_pick_rows = get_same_pick_market_rows(filtered_df, explained_row)
+            best_book = same_pick_rows.iloc[0]["Sportsbook"] if not same_pick_rows.empty else explained_row["Sportsbook"]
+            line_gap = float(same_pick_rows["Implied Prob"].max() - same_pick_rows["Implied Prob"].min()) if len(same_pick_rows) > 1 else 0.0
             st.markdown(
                 f"""
-                <div class="card">
-                <b>{explained_row['Pick']}</b><br>
-                {explained_row['Event']} · {explained_row['Market']}<br>
-                {build_badges_html(explained_row)}<br>
+                <div class="explain-hero">
+                    <b>{explained_row['Pick']}</b><br>
+                    {explained_row['Event']} · {explained_row['Market']}<br>
+                    {build_badges_html(explained_row)}
+                    <div class="explain-grid">
+                        <div class="explain-stat">
+                            <div class="explain-stat-label">Best Book</div>
+                            <div class="explain-stat-value">{best_book}</div>
+                        </div>
+                        <div class="explain-stat">
+                            <div class="explain-stat-label">Edge</div>
+                            <div class="explain-stat-value">{explained_row['Edge %']:.2f}%</div>
+                        </div>
+                        <div class="explain-stat">
+                            <div class="explain-stat-label">Final Bet</div>
+                            <div class="explain-stat-value">${int(explained_row['Final Bet'])}</div>
+                        </div>
+                        <div class="explain-stat">
+                            <div class="explain-stat-label">Line Gap</div>
+                            <div class="explain-stat-value">{line_gap:.2f}%</div>
+                        </div>
+                    </div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-            st.markdown(build_explain_bet_markdown(explained_row), unsafe_allow_html=False)
+            st.markdown(build_book_snapshot_html(explained_row, filtered_df), unsafe_allow_html=True)
+            st.markdown(build_explain_bet_markdown(explained_row, filtered_df), unsafe_allow_html=False)
 
     def sportsbook_section(book_name):
         book_df = filtered_df[filtered_df["Sportsbook"] == book_name].copy()
