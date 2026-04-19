@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import os
+import smtplib
 import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
 from math import prod
 
 import altair as alt
@@ -320,6 +322,97 @@ def get_secret(name):
         return st.secrets.get(name)
     except Exception:
         return None
+
+
+def send_recap_email():
+    """Send today's recap via SMTP. Returns (ok: bool, msg: str)."""
+    smtp_host = get_secret("SMTP_HOST")
+    smtp_user = get_secret("SMTP_USER")
+    smtp_pass = get_secret("SMTP_PASSWORD")
+    smtp_to = get_secret("SMTP_TO") or smtp_user
+    try:
+        smtp_port = int(get_secret("SMTP_PORT") or 587)
+    except (TypeError, ValueError):
+        smtp_port = 587
+
+    if not (smtp_host and smtp_user and smtp_pass):
+        return False, "SMTP not configured. Add SMTP_* secrets in Streamlit Cloud."
+
+    bets = db_load_bets()
+    today = datetime.now(timezone.utc).date().isoformat()
+    placed_today = [b for b in bets if (b.get("created_at") or "").startswith(today)]
+    settled_today = [
+        b for b in bets
+        if b["status"] != "open"
+        and (b.get("settled_at") or "").startswith(today)
+    ]
+    wins = sum(1 for b in settled_today if b["status"] == "won")
+    losses = sum(1 for b in settled_today if b["status"] == "lost")
+    pnl = sum(
+        b["to_win"] if b["status"] == "won" else -b["stake"]
+        for b in settled_today
+    )
+    open_count = sum(1 for b in bets if b["status"] == "open")
+    all_settled = [b for b in bets if b["status"] != "open"]
+    total_pnl = sum(
+        b["to_win"] if b["status"] == "won" else -b["stake"]
+        for b in all_settled
+    )
+
+    lines = [
+        f"EDGE Daily Recap - {today}",
+        "",
+        f"Bets placed today: {len(placed_today)}",
+        f"Settled today: {wins}-{losses} ({wins + losses} total)",
+        f"Today's P&L: ${pnl:+,.2f}",
+        f"Open bets carrying over: {open_count}",
+        f"All-time settled P&L: ${total_pnl:+,.2f}",
+        "",
+        "Today's settled bets:",
+    ]
+    for b in settled_today[-15:]:
+        mark = "W" if b["status"] == "won" else "L"
+        delta = b["to_win"] if b["status"] == "won" else -b["stake"]
+        lines.append(
+            f"  [{mark}] {b['description']} ({b['book']}, "
+            f"{b['odds']:+d}, ${b['stake']:,.2f}) {delta:+,.2f}"
+        )
+    if not settled_today:
+        lines.append("  (none yet)")
+
+    msg = EmailMessage()
+    msg["Subject"] = f"EDGE Recap {today} - P&L ${pnl:+,.2f}"
+    msg["From"] = smtp_user
+    msg["To"] = smtp_to
+    msg.set_content("\n".join(lines))
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as srv:
+            srv.starttls()
+            srv.login(smtp_user, smtp_pass)
+            srv.send_message(msg)
+        return True, f"Recap sent to {smtp_to}"
+    except Exception as e:
+        return False, f"Send failed: {e}"
+
+
+def prop_trend_chip(key):
+    hist = db_history(key, limit=5)
+    if len(hist) < 2:
+        return ""
+    delta = (hist[-1] - hist[0]) * 100  # cents of decimal odds
+    n = len(hist)
+    if delta >= 1:
+        return (
+            f"<span class='trend-chip trend-up'>"
+            f"&#8599; +{delta:.0f}c / {n} reads</span>"
+        )
+    if delta <= -1:
+        return (
+            f"<span class='trend-chip trend-down'>"
+            f"&#8600; {delta:.0f}c / {n} reads</span>"
+        )
+    return f"<span class='trend-chip trend-flat'>flat / {n} reads</span>"
 
 
 def american_to_decimal(american):
@@ -704,23 +797,86 @@ section[data-testid="stSidebar"] { background: __PANEL__; }
     margin-right:6px;
 }
 .ticker-wrap {
-    background: __PANEL__; border-radius: 10px;
-    border: 1px solid rgba(255,255,255,.08);
+    background: linear-gradient(90deg,#0F172A 0%,__PANEL__ 50%,#0F172A 100%);
+    border-radius: 10px;
+    border: 1px solid rgba(158,27,50,.35);
     overflow: hidden; margin-bottom: 14px; padding: 10px 0;
     position: relative;
+    box-shadow: 0 0 24px rgba(158,27,50,.15) inset;
 }
+.ticker-wrap::before, .ticker-wrap::after {
+    content: ""; position: absolute; top: 0; bottom: 0; width: 80px; z-index: 2;
+    pointer-events: none;
+}
+.ticker-wrap::before { left: 0; background: linear-gradient(90deg,#0F172A,transparent); }
+.ticker-wrap::after  { right: 0; background: linear-gradient(-90deg,#0F172A,transparent); }
+.live-tag {
+    position:absolute; left:10px; top:50%; transform:translateY(-50%);
+    background:__CRIMSON__; color:#FFF; font-weight:800; font-size:.72rem;
+    padding:3px 9px; border-radius:4px; letter-spacing:.08em; z-index:3;
+    display:flex; align-items:center; gap:6px;
+}
+.live-tag .dot {
+    width:6px; height:6px; border-radius:50%; background:#FFF;
+    animation: live-pulse 1.2s ease-in-out infinite;
+}
+@keyframes live-pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.7)} }
 .ticker {
     display: inline-block; white-space: nowrap; padding-left: 100%;
-    animation: ticker-scroll 90s linear infinite;
+    animation: ticker-scroll 45s linear infinite;
     font-variant-numeric: tabular-nums;
 }
+.ticker:hover { animation-play-state: paused; }
 .ticker .item { display:inline-block; padding: 0 28px; color:#E2E8F0; font-weight:600; }
-.ticker .edge { color: __GREEN__; margin-left:8px; }
+.ticker .edge { color: __GREEN__; margin-left:8px; font-weight:800; }
 .ticker .sep  { color: __MUTED__; margin: 0 6px; }
 @keyframes ticker-scroll {
     from { transform: translateX(0); }
     to   { transform: translateX(-100%); }
 }
+.spotlight {
+    position: relative;
+    background: linear-gradient(135deg, var(--spot-c1) 0%, var(--spot-c2) 60%, #0B1220 100%);
+    border-radius: 18px; padding: 22px 26px; margin-bottom: 18px;
+    border: 1px solid rgba(255,255,255,.10);
+    overflow: hidden;
+    box-shadow: 0 16px 50px rgba(0,0,0,.45),
+                0 0 60px var(--spot-glow) inset;
+}
+.spotlight::before {
+    content:""; position:absolute; inset:0;
+    background: radial-gradient(circle at 80% 20%, var(--spot-glow) 0%, transparent 55%);
+    pointer-events:none; opacity:.55;
+}
+.spotlight .label {
+    display:inline-block; background:rgba(0,0,0,.45); color:#FDE68A;
+    padding:4px 12px; border-radius:999px; font-size:.72rem;
+    font-weight:800; letter-spacing:.12em; text-transform:uppercase;
+    margin-bottom:10px; backdrop-filter: blur(4px);
+}
+.spotlight .matchup { color:#F8FAFC; font-size:1.4rem; font-weight:800; margin-bottom:6px; }
+.spotlight .pick { color:#FDE68A; font-size:1.85rem; font-weight:900; margin:6px 0 4px; line-height:1.1; }
+.spotlight .meta { color:#E2E8F0; font-size:.95rem; opacity:.9; }
+.spotlight .conf-ring {
+    position:relative; width:120px; height:120px;
+}
+.spotlight .conf-ring svg { transform: rotate(-90deg); }
+.spotlight .conf-ring .ring-bg { stroke: rgba(255,255,255,.12); }
+.spotlight .conf-ring .ring-fg { stroke: __GREEN__; transition: stroke-dashoffset 1s ease; }
+.spotlight .conf-ring .conf-text {
+    position:absolute; inset:0; display:flex; flex-direction:column;
+    align-items:center; justify-content:center;
+}
+.spotlight .conf-text .pct { color:#F8FAFC; font-size:1.5rem; font-weight:800; }
+.spotlight .conf-text .lbl { color:#94A3B8; font-size:.7rem; text-transform:uppercase; letter-spacing:.08em; }
+.trend-chip {
+    display:inline-block; padding:2px 8px; border-radius:6px;
+    font-size:.72rem; font-weight:700; margin-left:6px;
+    font-variant-numeric: tabular-nums;
+}
+.trend-up   { background:rgba(34,197,94,.18); color:__GREEN__; border:1px solid rgba(34,197,94,.4); }
+.trend-down { background:rgba(239,68,68,.18); color:__RED__; border:1px solid rgba(239,68,68,.4); }
+.trend-flat { background:rgba(148,163,184,.18); color:__MUTED__; border:1px solid rgba(148,163,184,.3); }
 .book-bar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom: 14px; }
 .book-link {
     display:inline-block; padding: 10px 16px; border-radius: 10px;
@@ -784,6 +940,7 @@ CSS = (
        .replace("__MUTED__", MUTED)
        .replace("__GREEN__", GREEN)
        .replace("__AMBER__", AMBER)
+       .replace("__RED__", RED)
 )
 st.markdown(CSS, unsafe_allow_html=True)
 
@@ -937,6 +1094,7 @@ if top_for_ticker:
         )
     ticker_html = (
         "<div class='ticker-wrap'>"
+        "<div class='live-tag'><span class='dot'></span>LIVE</div>"
         f"<div class='ticker'>{items}{items}</div>"
         "</div>"
     )
@@ -960,6 +1118,78 @@ tab_picks, tab_props, tab_pp_board, tab_parlay, tab_board, tab_bank = st.tabs(
 
 with tab_picks:
     st.subheader("Today's Suggested Bets")
+
+    spotlight_pool = []
+    for r in all_team_picks:
+        spotlight_pool.append({
+            "kind": "team", "edge": r["edge_bps"], "matchup": r["matchup"],
+            "league": r["league"], "pick": r["pick"], "book": r["book"],
+            "price": r["price"], "books_count": r["books_count"], "row": r,
+        })
+    for r in all_prop_picks:
+        spotlight_pool.append({
+            "kind": "prop", "edge": r["edge_bps"], "matchup": r["matchup"],
+            "league": r["league"],
+            "pick": f"{r['player']} {r['side']} {r['line']:g} {r['stat']}",
+            "book": r["book"], "price": r["price"],
+            "books_count": r["books_count"], "row": r,
+        })
+    spotlight_pool.sort(key=lambda x: x["edge"], reverse=True)
+    if spotlight_pool and spotlight_pool[0]["edge"] > 0:
+        sp = spotlight_pool[0]
+        away = sp["matchup"].split(" @ ")[0] if " @ " in sp["matchup"] else sp["matchup"]
+        home = sp["matchup"].split(" @ ")[-1]
+        c1 = team_color(away)
+        c2 = team_color(home)
+        glow = c1 + "55"  # alpha
+        try:
+            stake_v, tier_v, color_v = size_pick(sp["row"])
+        except Exception:
+            stake_v, tier_v, color_v = 0.0, "Pass", MUTED
+        # Confidence: scale edge to 0-100% (250bps = 100%)
+        conf = max(0.0, min(1.0, sp["edge"] / 250.0))
+        circ = 2 * 3.14159 * 50
+        dash_off = circ * (1.0 - conf)
+        ring_color = GREEN if conf > 0.6 else (AMBER if conf > 0.3 else RED)
+        kind_label = "PLAYER PROP" if sp["kind"] == "prop" else "TEAM PICK"
+        spotlight_html = (
+            f"<div class='spotlight' style='--spot-c1:{c1}; --spot-c2:{c2}; "
+            f"--spot-glow:{glow};'>"
+            "<div style='display:flex; justify-content:space-between; "
+            "align-items:center; gap:24px; position:relative; z-index:1;'>"
+            "<div>"
+            f"<div class='label'>&#11088; PICK OF THE DAY &middot; {kind_label}</div>"
+            f"<div class='matchup'>{matchup_badges(sp['matchup'])} "
+            f"<span class='muted' style='font-size:.85rem; margin-left:8px;'>"
+            f"{sp['league']}</span></div>"
+            f"<div class='pick'>{sp['pick']}</div>"
+            f"<div class='meta'>{format_american(sp['price'])} on "
+            f"{book_badge(sp['book'])} &middot; "
+            f"{sp['books_count']} books &middot; "
+            f"<b style='color:{GREEN};'>{format_bps(sp['edge'])} edge</b> "
+            f"&middot; suggested stake "
+            f"<b style='color:{color_v};'>${stake_v:,.2f}</b> "
+            f"<span class='muted'>({tier_v})</span></div>"
+            "</div>"
+            "<div class='conf-ring'>"
+            "<svg width='120' height='120' viewBox='0 0 120 120'>"
+            "<circle class='ring-bg' cx='60' cy='60' r='50' "
+            "fill='none' stroke-width='10'/>"
+            f"<circle class='ring-fg' cx='60' cy='60' r='50' fill='none' "
+            f"stroke-width='10' stroke-linecap='round' stroke='{ring_color}' "
+            f"stroke-dasharray='{circ:.1f}' "
+            f"stroke-dashoffset='{dash_off:.1f}'/>"
+            "</svg>"
+            "<div class='conf-text'>"
+            f"<div class='pct'>{int(conf * 100)}%</div>"
+            "<div class='lbl'>confidence</div>"
+            "</div>"
+            "</div>"
+            "</div>"
+            "</div>"
+        )
+        st.markdown(spotlight_html, unsafe_allow_html=True)
+
     rows = all_team_picks
 
     if rows:
@@ -1166,16 +1396,19 @@ with tab_props:
         for r in prop_rows[:25]:
             stake, tier, color = size_pick(r)
             stake_txt = f"${stake:,.2f}" if stake > 0 else "Pass"
-            spark = svg_sparkline(db_history(pick_key_prop(r)))
+            prop_key = pick_key_prop(r)
+            spark = svg_sparkline(db_history(prop_key))
             spark_html = (
                 f"<span class='pick-sub' style='margin-right:6px;'>line</span>{spark}"
                 if spark else ""
             )
+            trend_html = prop_trend_chip(prop_key)
             card = (
                 "<div class='pick-card'><div class='pick-row'>"
                 "<div>"
                 f"<div class='pick-title'>{r['player']} - "
-                f"<span class='muted'>{r['stat']} {r['side']} {r['line']:g}</span></div>"
+                f"<span class='muted'>{r['stat']} {r['side']} {r['line']:g}</span>"
+                f"{trend_html}</div>"
                 f"<div class='pick-sub' style='margin-top:4px;'>"
                 f"{matchup_badges(r['matchup'])}"
                 f"<span style='margin:0 8px;' class='muted'>{r['league']}</span>"
@@ -1666,6 +1899,51 @@ with tab_bank:
             }
             db_insert_bet(bet)
             st.rerun()
+
+    st.subheader("Daily Recap Email")
+    smtp_ok = bool(
+        get_secret("SMTP_HOST")
+        and get_secret("SMTP_USER")
+        and get_secret("SMTP_PASSWORD")
+    )
+    em_l, em_r = st.columns([3, 1])
+    with em_l:
+        if smtp_ok:
+            recipient = get_secret("SMTP_TO") or get_secret("SMTP_USER")
+            st.caption(
+                f"SMTP configured - recap will go to **{recipient}**"
+            )
+        else:
+            st.caption(
+                "SMTP not configured. Add the secrets below in Streamlit Cloud "
+                "(Manage app -> Settings -> Secrets), reboot, then come back."
+            )
+            with st.expander("Setup instructions (Gmail example)"):
+                st.markdown(
+                    "1. Turn on 2-Step Verification on your Google account.\n"
+                    "2. Visit **myaccount.google.com/apppasswords** -> "
+                    "create an app password called 'EDGE'.\n"
+                    "3. In Streamlit Cloud Secrets, add:\n"
+                    "```\n"
+                    "SMTP_HOST = \"smtp.gmail.com\"\n"
+                    "SMTP_PORT = \"587\"\n"
+                    "SMTP_USER = \"you@gmail.com\"\n"
+                    "SMTP_PASSWORD = \"xxxx xxxx xxxx xxxx\"\n"
+                    "SMTP_TO = \"you@gmail.com\"\n"
+                    "```\n"
+                    "4. Save, reboot the app, click **Send recap now**.\n\n"
+                    "Other providers: Outlook uses `smtp.office365.com`, "
+                    "Yahoo `smtp.mail.yahoo.com`, port 587 + STARTTLS for all."
+                )
+    with em_r:
+        if st.button(
+            "Send recap now", use_container_width=True,
+            disabled=not smtp_ok, type="primary",
+        ):
+            with st.spinner("Sending..."):
+                ok, msg = send_recap_email()
+            (st.success if ok else st.error)(msg)
+    st.markdown("&nbsp;", unsafe_allow_html=True)
 
     st.subheader("Active bets")
     open_bets = [b for b in bets if b["status"] == "open"]
