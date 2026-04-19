@@ -1,6 +1,7 @@
 """Edge - Sports Betting Dashboard (Streamlit)"""
 from __future__ import annotations
 
+import math
 import os
 import sqlite3
 import time
@@ -12,6 +13,7 @@ import altair as alt
 import pandas as pd
 import requests
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 LEAGUES = [
     {"id": "NBA", "name": "NBA"},
@@ -40,14 +42,6 @@ AMBER = "#F59E0B"
 RED = "#EF4444"
 MUTED = "#94A3B8"
 
-TIER_COLORS = {
-    "High confidence":   GREEN,
-    "Medium confidence": AMBER,
-    "Low confidence":    AMBER,
-    "Speculative":       MUTED,
-    "Pass":              RED,
-}
-
 
 def db_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -74,9 +68,7 @@ def db_conn():
 
 def db_load_bets():
     conn = db_conn()
-    rows = conn.execute(
-        "SELECT * FROM bets ORDER BY created_at ASC"
-    ).fetchall()
+    rows = conn.execute("SELECT * FROM bets ORDER BY created_at ASC").fetchall()
     return [dict(r) for r in rows]
 
 
@@ -144,18 +136,49 @@ def format_bps(bps):
     return f"{bps:+.0f} bps"
 
 
-def recommend_stake(edge_bps, books_count, min_bet, max_bet):
+def tier_label(edge_bps, books_count):
     if edge_bps <= 0 or books_count < 2:
-        return 0.0, "Pass", RED
+        return "Pass", RED
     if edge_bps >= 150 and books_count >= 5:
-        return max_bet, "High confidence", GREEN
+        return "High confidence", GREEN
     if edge_bps >= 75 and books_count >= 4:
-        return round(min_bet + (max_bet - min_bet) * 0.6, 2), "Medium confidence", AMBER
+        return "Medium confidence", AMBER
     if edge_bps >= 25 and books_count >= 3:
-        return round(min_bet + (max_bet - min_bet) * 0.25, 2), "Low confidence", AMBER
+        return "Low confidence", "#D97706"
     if edge_bps >= 10:
-        return min_bet, "Speculative", MUTED
-    return 0.0, "Pass", RED
+        return "Speculative", MUTED
+    return "Pass", RED
+
+
+def recommend_stake_tier(edge_bps, books_count, min_bet, max_bet):
+    tier, color = tier_label(edge_bps, books_count)
+    if tier == "Pass":
+        return 0.0, tier, color
+    if tier == "High confidence":
+        return max_bet, tier, color
+    if tier == "Medium confidence":
+        return round(min_bet + (max_bet - min_bet) * 0.6, 2), tier, color
+    if tier == "Low confidence":
+        return round(min_bet + (max_bet - min_bet) * 0.25, 2), tier, color
+    return min_bet, tier, color
+
+
+def kelly_stake(edge_bps, books_count, best_dec, avg_dec, bankroll,
+                min_bet, max_bet, kelly_mult):
+    tier, color = tier_label(edge_bps, books_count)
+    if tier == "Pass" or avg_dec <= 1.0 or best_dec <= 1.0:
+        return 0.0, "Pass", RED
+    p = 1.0 / avg_dec
+    b = best_dec - 1.0
+    q = 1.0 - p
+    f = (p * b - q) / b
+    if f <= 0:
+        return 0.0, "Pass", RED
+    raw = bankroll * f * kelly_mult
+    stake = max(min_bet, min(max_bet, raw))
+    if stake < min_bet:
+        return 0.0, "Pass", RED
+    return round(stake, 2), tier, color
 
 
 def kpi(label, value, color="#F8FAFC"):
@@ -290,8 +313,7 @@ def parse_event(ev, league, books_filter):
             except (TypeError, ValueError):
                 continue
             prices.append(BookPrice(
-                book=book_id,
-                price_american=am_f,
+                book=book_id, price_american=am_f,
                 price_decimal=american_to_decimal(am_f),
             ))
         if not prices:
@@ -309,8 +331,9 @@ def parse_event(ev, league, books_filter):
                 or players_dir.get(player_id, {}).get("nameFull")
                 or player_id
             )
-            key_t = (player_name, stat_id or "stat", point, side)
-            prop_buckets.setdefault(key_t, []).extend(prices)
+            prop_buckets.setdefault(
+                (player_name, stat_id or "stat", point, side), []
+            ).extend(prices)
             continue
 
         if bt == "ml" and side in ("home", "away"):
@@ -404,6 +427,8 @@ def all_picks(books_filter, kind):
                             "pick": _pick_label(oc, m.type),
                             "book": oc.best.book,
                             "price": oc.best.price_american,
+                            "best_dec": oc.best.price_decimal,
+                            "avg_dec": oc.avg_decimal,
                             "books_count": len(oc.books),
                             "edge_bps": oc.edge_bps,
                             "start": ev.start,
@@ -422,6 +447,8 @@ def all_picks(books_filter, kind):
                         "line": oc.point,
                         "book": oc.best.book,
                         "price": oc.best.price_american,
+                        "best_dec": oc.best.price_decimal,
+                        "avg_dec": oc.avg_decimal,
                         "books_count": len(oc.books),
                         "edge_bps": oc.edge_bps,
                         "start": ev.start,
@@ -445,12 +472,30 @@ h1, h2, h3, h4 { color: #F8FAFC !important; letter-spacing: -0.01em; }
 section[data-testid="stSidebar"] { background: __PANEL__; }
 .edge-header {
     display:flex; align-items:center; justify-content:space-between;
-    padding: 18px 22px; border-radius: 14px; margin-bottom: 18px;
+    padding: 18px 22px; border-radius: 14px; margin-bottom: 12px;
     background: linear-gradient(135deg, __CRIMSON__ 0%, #4A0C18 100%);
     box-shadow: 0 10px 30px rgba(158,27,50,.25);
 }
 .edge-header h1 { margin:0; font-size: 1.6rem; }
 .edge-header .tag { color: rgba(255,255,255,.85); font-size:.85rem; }
+.ticker-wrap {
+    background: __PANEL__; border-radius: 10px;
+    border: 1px solid rgba(255,255,255,.08);
+    overflow: hidden; margin-bottom: 14px; padding: 10px 0;
+    position: relative;
+}
+.ticker {
+    display: inline-block; white-space: nowrap; padding-left: 100%;
+    animation: ticker-scroll 40s linear infinite;
+    font-variant-numeric: tabular-nums;
+}
+.ticker .item { display:inline-block; padding: 0 28px; color:#E2E8F0; font-weight:600; }
+.ticker .edge { color: __GREEN__; margin-left:8px; }
+.ticker .sep  { color: __MUTED__; margin: 0 6px; }
+@keyframes ticker-scroll {
+    from { transform: translateX(0); }
+    to   { transform: translateX(-100%); }
+}
 .book-bar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom: 14px; }
 .book-link {
     display:inline-block; padding: 10px 16px; border-radius: 10px;
@@ -490,8 +535,65 @@ CSS = (
        .replace("__PANEL__", PANEL)
        .replace("__CRIMSON__", CRIMSON)
        .replace("__MUTED__", MUTED)
+       .replace("__GREEN__", GREEN)
 )
 st.markdown(CSS, unsafe_allow_html=True)
+
+with st.sidebar:
+    st.markdown("### Bankroll")
+    bankroll = st.number_input("Bankroll ($)", min_value=10.0, value=500.0, step=10.0)
+    min_bet = st.number_input("Min bet ($)", min_value=1.0, value=1.0, step=1.0)
+    max_bet = st.number_input(
+        "Max bet ($)", min_value=min_bet, value=max(10.0, min_bet), step=1.0,
+    )
+    daily_cap_pct = st.slider("Daily exposure cap (% of bankroll)", 5, 100, 20)
+
+    st.markdown("---")
+    st.markdown("### Sizing model")
+    sizing_mode = st.radio(
+        "Mode", ["Tier ($1-$10)", "Fractional Kelly"], index=0,
+    )
+    kelly_mult = 0.25
+    if sizing_mode == "Fractional Kelly":
+        kelly_mult = st.slider(
+            "Kelly fraction", 0.05, 1.0, 0.25, 0.05,
+            help="0.25 = quarter Kelly. Lower = safer.",
+        )
+        st.caption(
+            "Uses consensus probability across books as the 'true' "
+            "probability. Bet capped at min/max."
+        )
+    else:
+        st.caption("Tiers: $1 speculative -> $10 high-confidence. Pass when no edge.")
+
+    st.markdown("---")
+    st.markdown("### Live data")
+    auto_refresh = st.checkbox("Auto-refresh every 60s", value=True)
+    if auto_refresh:
+        st_autorefresh(interval=60 * 1000, key="auto_refresh_tick")
+
+    st.markdown("---")
+    st.markdown("### Filters")
+    book_choice = st.multiselect(
+        "Books to compare",
+        ["draftkings", "fanduel", "bet365"],
+        default=["draftkings", "fanduel", "bet365"],
+    )
+
+books_filter = set(book_choice) if book_choice else TARGET_BOOKS
+daily_cap = bankroll * daily_cap_pct / 100.0
+
+
+def size_pick(r):
+    if sizing_mode == "Fractional Kelly":
+        return kelly_stake(
+            r["edge_bps"], r["books_count"], r["best_dec"], r["avg_dec"],
+            bankroll, min_bet, max_bet, kelly_mult,
+        )
+    return recommend_stake_tier(
+        r["edge_bps"], r["books_count"], min_bet, max_bet,
+    )
+
 
 now_str = datetime.now().strftime("%I:%M %p")
 header_html = (
@@ -506,6 +608,26 @@ header_html = (
 )
 st.markdown(header_html, unsafe_allow_html=True)
 
+all_team_picks = all_picks(books_filter, kind="team")
+top_for_ticker = [r for r in all_team_picks if r["edge_bps"] > 0][:8]
+if top_for_ticker:
+    items = ""
+    for r in top_for_ticker:
+        items += (
+            "<span class='item'>"
+            f"{r['league']} <span class='sep'>|</span> "
+            f"{r['matchup']} <span class='sep'>|</span> "
+            f"{r['pick']} {format_american(r['price'])} ({r['book']})"
+            f"<span class='edge'>{format_bps(r['edge_bps'])}</span>"
+            "</span>"
+        )
+    ticker_html = (
+        "<div class='ticker-wrap'>"
+        f"<div class='ticker'>{items}{items}</div>"
+        "</div>"
+    )
+    st.markdown(ticker_html, unsafe_allow_html=True)
+
 links_html = "<div class='book-bar'>"
 for b in SPORTSBOOK_LINKS:
     links_html += (
@@ -516,39 +638,16 @@ for b in SPORTSBOOK_LINKS:
 links_html += "</div>"
 st.markdown(links_html, unsafe_allow_html=True)
 
-with st.sidebar:
-    st.markdown("### Bankroll")
-    bankroll = st.number_input("Bankroll ($)", min_value=10.0, value=500.0, step=10.0)
-    min_bet = st.number_input("Min bet ($)", min_value=1.0, value=1.0, step=1.0)
-    max_bet = st.number_input(
-        "Max bet ($)", min_value=min_bet, value=max(10.0, min_bet), step=1.0,
-    )
-    daily_cap_pct = st.slider("Daily exposure cap (% of bankroll)", 5, 100, 20)
-    st.caption("Sizing: $1 speculative -> $10 high-confidence. 'Pass' when no edge.")
-    st.markdown("---")
-    st.markdown("### Filters")
-    book_choice = st.multiselect(
-        "Books to compare",
-        ["draftkings", "fanduel", "bet365"],
-        default=["draftkings", "fanduel", "bet365"],
-    )
-
-books_filter = set(book_choice) if book_choice else TARGET_BOOKS
-daily_cap = bankroll * daily_cap_pct / 100.0
-
 tab_picks, tab_props, tab_parlay, tab_board, tab_bank = st.tabs(
     ["Suggested Picks", "PrizePicks Picks", "Parlay Builder", "Odds Board", "Bankroll"]
 )
 
 with tab_picks:
     st.subheader("Today's Suggested Bets")
-    rows = all_picks(books_filter, kind="team")
+    rows = all_team_picks
 
     if rows:
-        sized = [
-            (r, *recommend_stake(r["edge_bps"], r["books_count"], min_bet, max_bet))
-            for r in rows
-        ]
+        sized = [(r, *size_pick(r)) for r in rows]
         playable = [s for s in sized if s[1] > 0]
         total_stake = sum(s[1] for s in playable)
         top_edge = max((r["edge_bps"] for r in rows), default=0.0)
@@ -585,19 +684,49 @@ with tab_picks:
                         domain=order,
                         range=[GREEN, AMBER, "#D97706", MUTED, RED],
                     ),
-                    legend=alt.Legend(title="Confidence", labelColor="#E2E8F0",
-                                      titleColor="#F8FAFC"),
+                    legend=alt.Legend(
+                        title="Confidence",
+                        labelColor="#E2E8F0", titleColor="#F8FAFC",
+                    ),
                 ),
                 tooltip=["Tier", "Count"],
             )
-            .properties(height=240, background=PANEL, title=alt.TitleParams(
-                "Confidence breakdown", color="#F8FAFC", anchor="start",
-            ))
+            .properties(
+                height=240, background=PANEL,
+                title=alt.TitleParams(
+                    "Confidence breakdown", color="#F8FAFC", anchor="start",
+                ),
+            )
         )
-        ch_col, sp_col = st.columns([1, 2])
-        ch_col.altair_chart(donut, use_container_width=True)
-        with sp_col:
-            st.markdown("&nbsp;", unsafe_allow_html=True)
+
+        edge_df = pd.DataFrame([{"Edge_bps": r["edge_bps"]} for r in rows])
+        hist = (
+            alt.Chart(edge_df)
+            .mark_bar(color=CRIMSON, stroke=BG, strokeWidth=1)
+            .encode(
+                x=alt.X(
+                    "Edge_bps:Q",
+                    bin=alt.Bin(maxbins=24),
+                    title="Edge (basis points)",
+                    axis=alt.Axis(labelColor="#94A3B8", titleColor="#E2E8F0"),
+                ),
+                y=alt.Y(
+                    "count():Q", title="Picks",
+                    axis=alt.Axis(labelColor="#94A3B8", titleColor="#E2E8F0"),
+                ),
+                tooltip=[alt.Tooltip("count():Q", title="Picks")],
+            )
+            .properties(
+                height=240, background=PANEL,
+                title=alt.TitleParams(
+                    "Edge distribution", color="#F8FAFC", anchor="start",
+                ),
+            )
+        )
+
+        ch1, ch2 = st.columns(2)
+        ch1.altair_chart(donut, use_container_width=True)
+        ch2.altair_chart(hist, use_container_width=True)
 
     if not rows:
         st.info("No bets to suggest right now. Check that your API key is set.")
@@ -643,9 +772,7 @@ with tab_props:
         st.info("No player props are coming through the feed right now.")
     else:
         for r in prop_rows[:25]:
-            stake, tier, color = recommend_stake(
-                r["edge_bps"], r["books_count"], min_bet, max_bet
-            )
+            stake, tier, color = size_pick(r)
             stake_txt = f"${stake:,.2f}" if stake > 0 else "Pass"
             card = (
                 "<div class='pick-card'><div class='pick-row'>"
@@ -671,7 +798,7 @@ with tab_parlay:
         "Combine 2+ picks into a parlay. Combined odds, payout, and the "
         "implied break-even win rate are calculated from the best line per leg."
     )
-    pool = all_picks(books_filter, kind="team")
+    pool = all_team_picks
     if not pool:
         st.info("No picks available to build a parlay.")
     else:
@@ -718,9 +845,9 @@ with tab_parlay:
                 unsafe_allow_html=True,
             )
             st.caption(
-                f"Average leg edge: {format_bps(avg_edge)}. "
-                "Note: parlays multiply book edge against you, so the real "
-                "edge is usually less than the average shown."
+                f"Average leg edge: {format_bps(avg_edge)}. Note: parlays "
+                "multiply book edge against you, so the real edge is usually "
+                "less than the average shown."
             )
 
             if st.button("Log this parlay", type="primary"):
@@ -778,8 +905,7 @@ with tab_board:
                     else:
                         best = "-"
                     rows_t.append({
-                        "Outcome": label,
-                        "Best": best,
+                        "Outcome": label, "Best": best,
                         "Books": len(oc.books),
                         "Edge": format_bps(oc.edge_bps),
                     })
@@ -799,7 +925,6 @@ with tab_board:
 
 with tab_bank:
     bets = db_load_bets()
-
     today = datetime.now(timezone.utc).date().isoformat()
     today_open = [
         b for b in bets if b["status"] == "open" and b["date"] == today
@@ -815,19 +940,14 @@ with tab_bank:
     pnl_color = GREEN if pnl >= 0 else RED
 
     c = st.columns(5)
-    c[0].markdown(
-        kpi("Starting bankroll", f"${bankroll:,.2f}"), unsafe_allow_html=True,
-    )
-    c[1].markdown(
-        kpi("Current equity", f"${equity:,.2f}"), unsafe_allow_html=True,
-    )
+    c[0].markdown(kpi("Starting bankroll", f"${bankroll:,.2f}"), unsafe_allow_html=True)
+    c[1].markdown(kpi("Current equity", f"${equity:,.2f}"), unsafe_allow_html=True)
     c[2].markdown(
         kpi("Settled P&L", f"${pnl:,.2f}", color=pnl_color),
         unsafe_allow_html=True,
     )
     c[3].markdown(
-        kpi("Today exposure", f"${today_exposure:,.2f}"),
-        unsafe_allow_html=True,
+        kpi("Today exposure", f"${today_exposure:,.2f}"), unsafe_allow_html=True,
     )
     remaining = max(daily_cap - today_exposure, 0)
     c[4].markdown(
@@ -853,17 +973,25 @@ with tab_bank:
             alt.Chart(eq_df)
             .mark_line(point=True, strokeWidth=3, color=line_color)
             .encode(
-                x=alt.X("Idx:Q", title="Settled bet #",
-                        axis=alt.Axis(labelColor="#94A3B8", titleColor="#E2E8F0")),
-                y=alt.Y("Equity:Q", title="Equity ($)",
-                        scale=alt.Scale(zero=False),
-                        axis=alt.Axis(labelColor="#94A3B8", titleColor="#E2E8F0",
-                                      format="$,.0f")),
+                x=alt.X(
+                    "Idx:Q", title="Settled bet #",
+                    axis=alt.Axis(labelColor="#94A3B8", titleColor="#E2E8F0"),
+                ),
+                y=alt.Y(
+                    "Equity:Q", title="Equity ($)",
+                    scale=alt.Scale(zero=False),
+                    axis=alt.Axis(
+                        labelColor="#94A3B8", titleColor="#E2E8F0", format="$,.0f",
+                    ),
+                ),
                 tooltip=["Idx", "Time", alt.Tooltip("Equity:Q", format="$,.2f")],
             )
-            .properties(height=260, background=PANEL, title=alt.TitleParams(
-                "Bankroll equity curve", color="#F8FAFC", anchor="start",
-            ))
+            .properties(
+                height=260, background=PANEL,
+                title=alt.TitleParams(
+                    "Bankroll equity curve", color="#F8FAFC", anchor="start",
+                ),
+            )
         )
         st.altair_chart(eq_chart, use_container_width=True)
     else:
@@ -920,9 +1048,7 @@ with tab_bank:
     if settled:
         st.subheader("Recent settled bets")
         for b in sorted(
-            settled,
-            key=lambda x: x.get("settled_at") or "",
-            reverse=True,
+            settled, key=lambda x: x.get("settled_at") or "", reverse=True,
         )[:15]:
             mark = "W" if b["status"] == "won" else "L"
             color = GREEN if b["status"] == "won" else RED
