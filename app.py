@@ -3262,9 +3262,19 @@ Bankroll tab. Params: <code>addBet</code>, <code>book</code>,
             return m.group(1) if m else None
 
         _vid = _yt_id(_user_url)
-        _embed_src = (
+        _base_embed = (
             f"https://www.youtube.com/embed/{_vid}" if _vid
             else _default_embed
+        )
+        # Autoplay when on a team theme; loop for ambience
+        _ap_id = _vid or _default_vid
+        _sep = "&" if "?" in _base_embed else "?"
+        _embed_src = (
+            f"{_base_embed}{_sep}autoplay=1&playsinline=1"
+            f"&loop=1&playlist={_ap_id}"
+            if _theme_name in ("Alabama Crimson Tide",
+                               "Tennessee Volunteers")
+            else _base_embed
         )
         st.markdown(
             f"<iframe width='100%' height='200' "
