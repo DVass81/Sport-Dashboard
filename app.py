@@ -106,10 +106,52 @@ RED = "#EF4444"
 MUTED = "#94A3B8"
 
 
+try:
+    import psycopg2
+    import psycopg2.extras  # noqa: F401
+    HAS_PG = True
+except ImportError:
+    HAS_PG = False
+
+
+def _pg_url():
+    val = os.environ.get("DATABASE_URL")
+    if val:
+        return val
+    try:
+        return st.secrets.get("DATABASE_URL")
+    except Exception:
+        return None
+
+
+def _use_pg():
+    return HAS_PG and bool(_pg_url())
+
+
+def storage_label():
+    if _use_pg():
+        return "Postgres (Supabase)"
+    if not HAS_PG and _pg_url():
+        return "SQLite (psycopg2 missing)"
+    return "SQLite (ephemeral)"
+
+
 def db_conn():
+    if _use_pg():
+        return psycopg2.connect(_pg_url())
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute(
+    return conn
+
+
+def _q(sql):
+    return sql.replace("?", "%s") if _use_pg() else sql
+
+
+def db_init():
+    conn = db_conn()
+    cur = conn.cursor()
+    cur.execute(
         """CREATE TABLE IF NOT EXISTS bets (
             id TEXT PRIMARY KEY,
             date TEXT,
@@ -125,7 +167,7 @@ def db_conn():
             settled_at TEXT
         )"""
     )
-    conn.execute(
+    cur.execute(
         """CREATE TABLE IF NOT EXISTS odds_history (
             pick_key TEXT,
             ts TEXT,
@@ -133,27 +175,40 @@ def db_conn():
             best_american INTEGER
         )"""
     )
-    conn.execute(
+    cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_odds_key_ts "
         "ON odds_history(pick_key, ts)"
     )
     conn.commit()
-    return conn
+    conn.close()
+
+
+@st.cache_resource(show_spinner=False)
+def _ensure_schema():
+    db_init()
+    return True
 
 
 def db_load_bets():
+    _ensure_schema()
     conn = db_conn()
-    rows = conn.execute("SELECT * FROM bets ORDER BY created_at ASC").fetchall()
-    return [dict(r) for r in rows]
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM bets ORDER BY created_at ASC")
+    cols = [d[0] for d in cur.description]
+    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    conn.close()
+    return rows
 
 
 def db_insert_bet(bet):
+    _ensure_schema()
     conn = db_conn()
-    conn.execute(
-        """INSERT INTO bets
+    cur = conn.cursor()
+    cur.execute(
+        _q("""INSERT INTO bets
         (id, date, description, book, odds, stake, to_win, status, kind, legs,
          created_at, settled_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"""),
         (
             bet["id"], bet["date"], bet["description"], bet["book"],
             int(bet["odds"]), float(bet["stake"]), float(bet["to_win"]),
@@ -162,21 +217,28 @@ def db_insert_bet(bet):
         ),
     )
     conn.commit()
+    conn.close()
 
 
 def db_settle_bet(bet_id, status):
+    _ensure_schema()
     conn = db_conn()
-    conn.execute(
-        "UPDATE bets SET status=?, settled_at=? WHERE id=?",
+    cur = conn.cursor()
+    cur.execute(
+        _q("UPDATE bets SET status=?, settled_at=? WHERE id=?"),
         (status, datetime.now(timezone.utc).isoformat(), bet_id),
     )
     conn.commit()
+    conn.close()
 
 
 def db_delete_bet(bet_id):
+    _ensure_schema()
     conn = db_conn()
-    conn.execute("DELETE FROM bets WHERE id=?", (bet_id,))
+    cur = conn.cursor()
+    cur.execute(_q("DELETE FROM bets WHERE id=?"), (bet_id,))
     conn.commit()
+    conn.close()
 
 
 def pick_key_team(r):
@@ -193,7 +255,7 @@ def pick_key_prop(r):
 def db_snapshot(rows, kind):
     if not rows:
         return
-    conn = db_conn()
+    _ensure_schema()
     ts = datetime.now(timezone.utc).isoformat()
     data = []
     for r in rows:
@@ -204,24 +266,31 @@ def db_snapshot(rows, kind):
             continue
     if not data:
         return
-    conn.executemany(
-        "INSERT INTO odds_history(pick_key, ts, best_dec, best_american) "
-        "VALUES (?,?,?,?)",
+    conn = db_conn()
+    cur = conn.cursor()
+    cur.executemany(
+        _q("INSERT INTO odds_history(pick_key, ts, best_dec, best_american) "
+           "VALUES (?,?,?,?)"),
         data,
     )
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-    conn.execute("DELETE FROM odds_history WHERE ts < ?", (cutoff,))
+    cur.execute(_q("DELETE FROM odds_history WHERE ts < ?"), (cutoff,))
     conn.commit()
+    conn.close()
 
 
 def db_history(key, limit=30):
+    _ensure_schema()
     conn = db_conn()
-    rows = conn.execute(
-        "SELECT best_dec FROM odds_history WHERE pick_key=? "
-        "ORDER BY ts DESC LIMIT ?",
+    cur = conn.cursor()
+    cur.execute(
+        _q("SELECT best_dec FROM odds_history WHERE pick_key=? "
+           "ORDER BY ts DESC LIMIT ?"),
         (key, limit),
-    ).fetchall()
-    return [r["best_dec"] for r in reversed(rows)]
+    )
+    vals = [r[0] for r in cur.fetchall()]
+    conn.close()
+    return list(reversed(vals))
 
 
 def svg_sparkline(values, w=120, h=28):
@@ -547,9 +616,13 @@ def _pick_label(oc, market_type):
     return f"{oc.name} {oc.point:+g}"
 
 
-def all_picks(books_filter, kind):
+def all_picks(books_filter, kind, leagues_filter=None):
     rows = []
-    for lg in LEAGUES:
+    leagues_iter = [
+        lg for lg in LEAGUES
+        if leagues_filter is None or lg["id"] in leagues_filter
+    ]
+    for lg in leagues_iter:
         events, _ = get_board(lg["id"], books_filter)
         for ev in events:
             if kind == "team":
@@ -755,8 +828,22 @@ with st.sidebar:
         ["draftkings", "fanduel", "bet365"],
         default=["draftkings", "fanduel", "bet365"],
     )
+    st.caption("Active leagues")
+    league_toggle = {}
+    lg_cols = st.columns(2)
+    for i, lg in enumerate(LEAGUES):
+        with lg_cols[i % 2]:
+            league_toggle[lg["id"]] = st.checkbox(
+                lg["id"], value=True, key=f"lg_{lg['id']}",
+            )
+
+    st.markdown("---")
+    st.caption(f"Storage: {storage_label()}")
 
 books_filter = set(book_choice) if book_choice else TARGET_BOOKS
+leagues_filter = {k for k, v in league_toggle.items() if v}
+if not leagues_filter:
+    leagues_filter = {lg["id"] for lg in LEAGUES}
 daily_cap = bankroll * daily_cap_pct / 100.0
 
 
@@ -808,8 +895,8 @@ with rb_right:
         st.session_state["last_refresh"] = datetime.now(timezone.utc)
         st.rerun()
 
-all_team_picks = all_picks(books_filter, kind="team")
-all_prop_picks = all_picks(books_filter, kind="player")
+all_team_picks = all_picks(books_filter, kind="team", leagues_filter=leagues_filter)
+all_prop_picks = all_picks(books_filter, kind="player", leagues_filter=leagues_filter)
 db_snapshot(all_team_picks, "team")
 db_snapshot(all_prop_picks, "player")
 
@@ -1366,9 +1453,72 @@ with tab_bank:
     equity = bankroll + pnl
     pnl_color = GREEN if pnl >= 0 else RED
 
+    fx = st.session_state.pop("fx", None)
+    if fx == "win":
+        st.balloons()
+        st.markdown(
+            "<div style='background:rgba(34,197,94,.18);border:1px solid "
+            f"{GREEN};color:{GREEN};padding:10px 14px;border-radius:10px;"
+            "font-weight:700;animation:winflash .9s ease-out forwards;'>"
+            "WIN booked - bankroll updated</div>"
+            "<style>@keyframes winflash{0%{transform:scale(.97);opacity:.4}"
+            "100%{transform:scale(1);opacity:1}}</style>",
+            unsafe_allow_html=True,
+        )
+    elif fx == "loss":
+        st.markdown(
+            "<div id='lossfx' style='position:fixed;top:0;left:0;right:0;"
+            "bottom:0;background:rgba(239,68,68,.35);z-index:9998;"
+            "pointer-events:none;animation:lossflash .8s ease-out forwards;'>"
+            "</div>"
+            f"<div style='background:rgba(239,68,68,.18);border:1px solid "
+            f"{RED};color:{RED};padding:10px 14px;border-radius:10px;"
+            "font-weight:700;'>LOSS recorded - keep your discipline</div>"
+            "<style>@keyframes lossflash{0%{opacity:1}100%{opacity:0;"
+            "visibility:hidden}}</style>",
+            unsafe_allow_html=True,
+        )
+
+    prev_eq = st.session_state.get("prev_equity", equity)
+    st.session_state["prev_equity"] = equity
+
     c = st.columns(5)
     c[0].markdown(kpi("Starting bankroll", f"${bankroll:,.2f}"), unsafe_allow_html=True)
-    c[1].markdown(kpi("Current equity", f"${equity:,.2f}"), unsafe_allow_html=True)
+    with c[1]:
+        st.components.v1.html(
+            f"""
+            <style>
+              body {{margin:0;padding:0;background:transparent;
+                     font-family:-apple-system,Segoe UI,Roboto,sans-serif;}}
+              .kpi {{background:{PANEL};padding:14px 16px;border-radius:12px;
+                     border:1px solid rgba(255,255,255,.06);}}
+              .label {{color:{MUTED};font-size:.75rem;text-transform:uppercase;
+                       letter-spacing:.05em;margin-bottom:6px;}}
+              .value {{color:#F8FAFC;font-size:1.5rem;font-weight:700;
+                       font-variant-numeric:tabular-nums;}}
+            </style>
+            <div class='kpi'>
+              <div class='label'>Current equity</div>
+              <div class='value' id='eq'>${prev_eq:,.2f}</div>
+            </div>
+            <script>
+              (function(){{
+                var el=document.getElementById('eq');
+                var s={prev_eq},e={equity},dur=900,t0=performance.now();
+                function f(t){{
+                  var p=Math.min((t-t0)/dur,1);
+                  var k=1-Math.pow(1-p,3);
+                  var v=s+(e-s)*k;
+                  el.textContent='$'+v.toLocaleString('en-US',
+                    {{minimumFractionDigits:2,maximumFractionDigits:2}});
+                  if(p<1)requestAnimationFrame(f);
+                }}
+                requestAnimationFrame(f);
+              }})();
+            </script>
+            """,
+            height=92,
+        )
     c[2].markdown(
         kpi("Settled P&L", f"${pnl:,.2f}", color=pnl_color),
         unsafe_allow_html=True,
@@ -1530,9 +1680,11 @@ with tab_bank:
         cols[4].write(f"+${b['to_win']:,.2f}")
         if cols[5].button("Win", key=f"w{b['id']}"):
             db_settle_bet(b["id"], "won")
+            st.session_state["fx"] = "win"
             st.rerun()
         if cols[6].button("Loss", key=f"l{b['id']}"):
             db_settle_bet(b["id"], "lost")
+            st.session_state["fx"] = "loss"
             st.rerun()
         if cols[7].button("Del", key=f"d{b['id']}"):
             db_delete_bet(b["id"])
