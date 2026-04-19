@@ -1,11 +1,12 @@
 from datetime import datetime, timezone
 from html import escape
+import time
 import xml.etree.ElementTree as ET
 
 import pandas as pd
 import requests
 import streamlit as st
-import time
+
 st.set_page_config(
     page_title="Sports Betting Dashboard",
     page_icon="🏈",
@@ -391,22 +392,61 @@ def fetch_events(leagues):
     if not api_key:
         return [], "Missing SPORTS_GAME_ODDS_API_KEY in Streamlit secrets."
 
-    url = "https://api.sportsgameodds.com/v2/events/"
-    headers = {"x-api-key": api_key}
-    params = {
-        "leagueID": ",".join(leagues),
-        "oddsAvailable": "true",
-        "limit": 100,
-    }
+    all_events = []
+    errors = []
 
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=25)
-        response.raise_for_status()
-        payload = response.json()
-        events = payload.get("data", []) if isinstance(payload, dict) else payload
-        return events, ""
-    except Exception as exc:
-        return [], f"API error: {exc}"
+    headers = {"x-api-key": api_key}
+    url = "https://api.sportsgameodds.com/v2/events/"
+
+    for league in leagues:
+        params = {
+            "leagueID": league,
+            "oddsAvailable": "true",
+            "limit": 35,
+        }
+
+        success = False
+        for attempt in range(3):
+            try:
+                response = requests.get(url, headers=headers, params=params, timeout=25)
+
+                if response.status_code == 429:
+                    if attempt < 2:
+                        time.sleep(2 * (attempt + 1))
+                        continue
+                    errors.append(f"Rate limit hit for {league}")
+                    break
+
+                if response.status_code in (401, 403):
+                    return [], "API key is invalid or does not have access."
+
+                response.raise_for_status()
+                payload = response.json()
+                events = payload.get("data", []) if isinstance(payload, dict) else payload
+                all_events.extend(events)
+                success = True
+                time.sleep(0.4)
+                break
+
+            except requests.exceptions.RequestException as exc:
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                errors.append(f"{league}: {exc}")
+                break
+
+        if not success:
+            time.sleep(0.4)
+
+    if all_events:
+        if errors:
+            return all_events, "Partial load: " + " | ".join(errors)
+        return all_events, ""
+
+    if errors:
+        return [], "API error: " + " | ".join(errors)
+
+    return [], "API error: No events returned."
 
 
 def flatten_events_to_rows(events):
@@ -444,6 +484,7 @@ def flatten_events_to_rows(events):
                 if implied_prob is None:
                     continue
 
+                    # unreachable guard removed intentionally by structure
                 pick_label = build_pick_label(
                     odd=odd,
                     quote=quote,
@@ -853,6 +894,35 @@ st.markdown(
         margin-bottom: 16px;
     }
 
+    .decision-card {
+        background: linear-gradient(135deg, #ffffff 0%, #f5f9ff 100%);
+        border: 1px solid #d6e4f5;
+        border-radius: 18px;
+        padding: 18px;
+        box-shadow: 0 8px 20px rgba(22, 59, 104, 0.07);
+        margin-bottom: 16px;
+    }
+
+    .decision-title {
+        color: #163b68;
+        font-size: 1.1rem;
+        font-weight: 800;
+        margin-bottom: 8px;
+    }
+
+    .decision-big {
+        color: #0f2745;
+        font-size: 1.4rem;
+        font-weight: 900;
+        line-height: 1.25;
+    }
+
+    .decision-sub {
+        color: #49627f;
+        font-size: 0.95rem;
+        margin-top: 8px;
+    }
+
     .section-title {
         font-size: 1.3rem;
         font-weight: 800;
@@ -1174,21 +1244,25 @@ if st.sidebar.button("Refresh now"):
 
 st.markdown('<div class="main-title">🏈 Sports Betting Dashboard</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="sub-title">Stable core version with live odds, line movement, book comparison, and bankroll controls.</div>',
+    '<div class="sub-title">Stable core version with live odds, line movement, book comparison, bankroll controls, and 429 protection.</div>',
     unsafe_allow_html=True,
 )
 
 render_quick_links()
 
 
-@st.fragment(run_every="15m")
+@st.fragment(run_every="30m")
 def render_live_dashboard():
     events, error_message = fetch_events(league_filter)
 
     if error_message:
-        st.warning(error_message)
-        st.info("Add SPORTS_GAME_ODDS_API_KEY in Streamlit Secrets and click Refresh now.")
-        return
+        lowered = error_message.lower()
+        if "invalid" in lowered or "missing" in lowered:
+            st.error(error_message)
+            st.info("Add SPORTS_GAME_ODDS_API_KEY in Streamlit Secrets and click Refresh now.")
+            return
+        else:
+            st.warning(error_message)
 
     raw_df = flatten_events_to_rows(events)
     if raw_df.empty:
