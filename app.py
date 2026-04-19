@@ -3180,210 +3180,70 @@ Bankroll tab. Params: <code>addBet</code>, <code>book</code>,
 </div>""",
             unsafe_allow_html=True,
         )
-    # ---- Game-day theme music (#85) - theme-aware, works on Bama/Vols ----
+    # ---- Game-day theme music (#85) - YouTube fight songs ----
     with st.expander("Game-day theme music", expanded=False):
-        if _theme_name == "Alabama Crimson Tide":
-            _mode_label = "Crimson brass-band marching cadence"
-        elif _theme_name == "Tennessee Volunteers":
-            _mode_label = "Volunteer bluegrass / banjo riff"
-        else:
-            _mode_label = "Bloomberg ambient drone"
+        _DEFAULTS = {
+            "Alabama Crimson Tide": (
+                "Million Dollar Band - Yea Alabama",
+                "https://www.youtube.com/results?search_query="
+                "yea+alabama+million+dollar+band",
+                "tcYodQoapMg",
+            ),
+            "Tennessee Volunteers": (
+                "Pride of the Southland - Rocky Top",
+                "https://www.youtube.com/results?search_query="
+                "rocky+top+pride+of+the+southland+band",
+                "B3yTCgIckNs",
+            ),
+        }
+        _default_label, _search_url, _default_vid = _DEFAULTS.get(
+            _theme_name,
+            (
+                "Lo-fi trading beats",
+                "https://www.youtube.com/results?search_query=lofi+sports",
+                "jfKfPfyJRdk",
+            ),
+        )
         st.caption(
-            f"Now playing: {_mode_label}. Original synth loops generated in "
-            "your browser - no copyright, no downloads. The vibe matches "
-            "whichever team theme you have active."
+            f"Default for this theme: **{_default_label}**. "
+            "Paste any YouTube link below to swap it - it stays put per "
+            "theme until you change it. Click play in the player to start."
         )
-        from streamlit.components.v1 import html as _components_html
-        _mode_token = (
-            "bama" if _theme_name == "Alabama Crimson Tide"
-            else "vols" if _theme_name == "Tennessee Volunteers"
-            else "drone"
+
+        _key = f"music_url_{_theme_name}"
+        _user_url = st.text_input(
+            "YouTube URL (optional)",
+            value=st.session_state.get(_key, ""),
+            key=f"music_input_{_theme_name}",
+            placeholder="https://www.youtube.com/watch?v=...",
         )
-        _accent = _theme["accent"]
-        _ar2, _ag2, _ab2 = _hex_to_rgb(_accent)
-        _accent_rgb = f"{_ar2},{_ag2},{_ab2}"
-        _components_html(
-            f"""
-<style>
-  #edge-music-btn {{
-    width: 100%; padding: 10px 10px; border-radius: 8px;
-    background: #0F0F0F; color: #F3F4F6;
-    border: 1px solid rgba({_accent_rgb},.5);
-    font-family: "Bebas Neue", "Oswald", sans-serif;
-    letter-spacing: .14em; font-size: .9rem;
-    cursor: pointer; transition: all .2s;
-  }}
-  #edge-music-btn.on {{
-    background: {_accent}; border-color: {_accent};
-    box-shadow: 0 0 14px rgba({_accent_rgb},.55);
-    color: #fff;
-  }}
-  #edge-music-vol {{ width: 100%; margin-top: 8px; }}
-  #edge-music-mode {{
-    text-align:center; font-family: "Bebas Neue","Oswald",sans-serif;
-    letter-spacing:.18em; font-size:.74rem; color:#9CA3AF;
-    margin-top:6px;
-  }}
-</style>
-<button id="edge-music-btn">PLAY THEME</button>
-<input type="range" id="edge-music-vol" min="0" max="100" value="40" />
-<div id="edge-music-mode">MODE: {_mode_token.upper()}</div>
-<script>
-(function(){{
-  const MODE = "{_mode_token}";
-  let actx = null, master = null, playing = false;
-  let timer = null, nodes = [];
-  const btn = document.getElementById('edge-music-btn');
-  const vol = document.getElementById('edge-music-vol');
+        st.session_state[_key] = _user_url
 
-  function note(freq, start, dur, type, peak) {{
-    const o = actx.createOscillator();
-    const g = actx.createGain();
-    o.type = type || 'triangle';
-    o.frequency.value = freq;
-    g.gain.value = 0;
-    g.gain.setValueAtTime(0, start);
-    g.gain.linearRampToValueAtTime(peak || 0.25, start + 0.015);
-    g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
-    o.connect(g); g.connect(master);
-    o.start(start); o.stop(start + dur + 0.05);
-    nodes.push(o); nodes.push(g);
-  }}
+        def _yt_id(url):
+            import re as _re
+            if not url:
+                return None
+            m = _re.search(
+                r"(?:v=|youtu\.be/|/embed/|/shorts/)([A-Za-z0-9_-]{11})",
+                url,
+            )
+            return m.group(1) if m else None
 
-  // Pitch helpers (equal-tempered, A4=440)
-  function P(semisFromA4) {{ return 440 * Math.pow(2, semisFromA4/12); }}
-
-  // ---- DRONE: ambient pad (default theme) ----
-  function startDrone() {{
-    const lpf = actx.createBiquadFilter();
-    lpf.type='lowpass'; lpf.frequency.value=700; lpf.Q.value=.8;
-    const o1 = actx.createOscillator(); o1.type='sine';   o1.frequency.value=110;
-    const o2 = actx.createOscillator(); o2.type='triangle';o2.frequency.value=164.81;
-    const o3 = actx.createOscillator(); o3.type='sine';   o3.frequency.value=220;
-    const g1 = actx.createGain(); g1.gain.value=.55;
-    const g2 = actx.createGain(); g2.gain.value=.35;
-    const g3 = actx.createGain(); g3.gain.value=.22;
-    const lfo = actx.createOscillator(); lfo.frequency.value=0.07;
-    const lfoG = actx.createGain(); lfoG.gain.value=140;
-    lfo.connect(lfoG); lfoG.connect(lpf.frequency);
-    o1.connect(g1); o2.connect(g2); o3.connect(g3);
-    g1.connect(lpf); g2.connect(lpf); g3.connect(lpf);
-    lpf.connect(master);
-    o1.start(); o2.start(); o3.start(); lfo.start();
-    nodes.push(o1,o2,o3,lfo);
-  }}
-
-  // ---- BAMA: brass-band marching cadence (original) ----
-  // Snare-style stab + tuba root + brass interval, on the 4-count
-  function scheduleBama(t0) {{
-    const bpm = 132; const beat = 60/bpm;
-    const tuba = [-19, -19, -17, -19];     // E2 E2 F#2 E2 (root walk)
-    const brass = [ 0,  4,  7,  4];        // A4 C#5 E5 C#5
-    for (let i=0;i<4;i++) {{
-      const t = t0 + i*beat;
-      // tuba thump
-      note(P(tuba[i]), t, 0.42, 'sine', 0.32);
-      // snare-ish click (square burst high)
-      note(P(24), t, 0.05, 'square', 0.14);
-      note(P(26), t, 0.04, 'square', 0.10);
-      // brass stab
-      note(P(brass[i]),     t+0.04, 0.36, 'sawtooth', 0.18);
-      note(P(brass[i]+12),  t+0.04, 0.32, 'triangle', 0.10);
-    }}
-    return 4*beat;
-  }}
-
-  // ---- VOLS: bluegrass / banjo riff (original) ----
-  // Fast plucky 16ths over a I-IV-I-V country shape
-  function scheduleVols(t0) {{
-    const bpm = 168; const sixteenth = (60/bpm)/4;
-    // Root pattern across 4 beats (G major: G B D D)
-    const pattern = [
-      // beat 1: G B D B  (G major arp)
-      -2, 2, 5, 2,
-      // beat 2: G B D B
-      -2, 2, 5, 2,
-      // beat 3: C E G E  (IV)
-      3, 7, 10, 7,
-      // beat 4: D F# A F# (V)
-      5, 9, 12, 9,
-    ];
-    for (let i=0;i<pattern.length;i++) {{
-      const t = t0 + i*sixteenth;
-      // plucky banjo-ish: square through quick decay
-      note(P(pattern[i]+12),  t,        0.13, 'square',   0.16);
-      note(P(pattern[i]+24),  t+0.005,  0.10, 'triangle', 0.08);
-    }}
-    // bass walk underneath
-    const bass = [-14, -14, -9, -7]; // G2 G2 C3 D3
-    for (let i=0;i<4;i++) {{
-      const t = t0 + i*(60/bpm);
-      note(P(bass[i]), t, 0.5, 'sine', 0.30);
-    }}
-    return 4*(60/bpm);
-  }}
-
-  function loop() {{
-    const t0 = actx.currentTime + 0.05;
-    let dur = 1.0;
-    if (MODE === 'bama') dur = scheduleBama(t0);
-    else if (MODE === 'vols') dur = scheduleVols(t0);
-    timer = setTimeout(loop, Math.max(50, (dur*1000) - 30));
-  }}
-
-  function start() {{
-    try {{
-      const AC = window.AudioContext || window.webkitAudioContext;
-      actx = new AC();
-      master = actx.createGain();
-      master.gain.value = 0;
-      master.connect(actx.destination);
-      const target = (parseInt(vol.value)||40)/100 * 0.20;
-      master.gain.linearRampToValueAtTime(target, actx.currentTime + 0.6);
-      if (MODE === 'drone') {{
-        startDrone();
-      }} else {{
-        loop();
-      }}
-      playing = true;
-    }} catch(e) {{ console.error(e); }}
-  }}
-  function stop() {{
-    if (!actx) return;
-    try {{
-      if (timer) {{ clearTimeout(timer); timer = null; }}
-      master.gain.linearRampToValueAtTime(0, actx.currentTime + 0.5);
-      const a = actx;
-      setTimeout(function() {{
-        try {{ nodes.forEach(n => {{ try {{ n.stop && n.stop(); }} catch(e){{}} }}); }} catch(e){{}}
-        try {{ a.close(); }} catch(e){{}}
-        nodes = []; actx = null; master = null;
-      }}, 700);
-      playing = false;
-    }} catch(e) {{}}
-  }}
-
-  btn.addEventListener('click', function() {{
-    if (playing) {{
-      stop();
-      btn.textContent = 'PLAY THEME';
-      btn.classList.remove('on');
-    }} else {{
-      start();
-      btn.textContent = 'STOP THEME';
-      btn.classList.add('on');
-    }}
-  }});
-  vol.addEventListener('input', function() {{
-    if (master && actx) {{
-      const target = (parseInt(vol.value)||0)/100 * 0.20;
-      master.gain.linearRampToValueAtTime(target, actx.currentTime + 0.15);
-    }}
-  }});
-}})();
-</script>
-            """,
-            height=140,
+        _vid = _yt_id(_user_url) or _default_vid
+        st.markdown(
+            f"<iframe width='100%' height='200' "
+            f"src='https://www.youtube.com/embed/{_vid}' "
+            f"title='EDGE theme music' frameborder='0' "
+            f"allow='accelerometer; autoplay; clipboard-write; "
+            f"encrypted-media; gyroscope; picture-in-picture' "
+            f"allowfullscreen "
+            f"style='border-radius:10px;border:1px solid "
+            f"rgba(255,255,255,.08);'></iframe>",
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            f"[Browse {_default_label} on YouTube]({_search_url}) - "
+            "find your favorite version, copy the URL, paste it above."
         )
     st.markdown("---")
     st.markdown("### Bankroll")
