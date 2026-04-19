@@ -3795,14 +3795,14 @@ with tab_props:
         "Combined odds shown assume independence - real SGP prices are "
         "shorter because legs in one game are correlated."
     )
-    if not props_rows:
+    if not prop_rows:
         st.info("Run a board scan above to populate props.")
     else:
-        _games = sorted({r["matchup"] for r in props_rows})
+        _games = sorted({r["matchup"] for r in prop_rows})
         _sgp_game = st.selectbox(
             "Game", _games, key="sgp_game_pick",
         )
-        _sgp_pool = [r for r in props_rows if r["matchup"] == _sgp_game]
+        _sgp_pool = [r for r in prop_rows if r["matchup"] == _sgp_game]
         _sgp_labels = [
             f"{r['player']} {r['stat']} {r['side']} {r['line']:g} "
             f"@ {format_american(r['price'])} ({r['book']})"
