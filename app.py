@@ -335,8 +335,7 @@ def build_explain_bet_markdown(row, compare_df=None):
             notes.append(
                 f"**Important:** this row is not the best live number right now. The best current price is at **{best.get('Sportsbook', '—')}**."
             )
-TEMP_MARK
-
+    return "\n\n".join(notes)
 
 
 # -----------------------------
