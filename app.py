@@ -1189,6 +1189,20 @@ def style_figure(fig, height=350):
     return fig
 
 
+
+
+# -----------------------------
+# SAFE CHART RENDERING
+# -----------------------------
+def safe_plotly_chart(fig, name, use_container_width=True):
+    if fig is None:
+        return
+    if "_plotly_render_nonce" not in st.session_state:
+        st.session_state["_plotly_render_nonce"] = 0
+    st.session_state["_plotly_render_nonce"] += 1
+    unique_key = f"{name}_{st.session_state['_plotly_render_nonce']}"
+    st.plotly_chart(fig, use_container_width=use_container_width, key=unique_key)
+
 def plot_bankroll_curve(settled_df, starting_bankroll):
     if settled_df.empty:
         return None
@@ -1294,31 +1308,7 @@ def plot_line_gap_leaderboard(compare_df):
 
 
 def plot_line_heatmap(all_rows, compare_df):
-    if all_rows.empty or compare_df.empty:
-        return None
-
-    top_keys = compare_df.head(12)[["Event ID", "Odd ID"]].drop_duplicates()
-    merged = all_rows.merge(top_keys, on=["Event ID", "Odd ID"], how="inner")
-    if merged.empty:
-        return None
-
-    merged = merged.copy()
-    merged["Label"] = merged["Pick"] + " | " + merged["Event"]
-    pivot = merged.pivot_table(index="Label", columns="Sportsbook", values="Implied Prob", aggfunc="first")
-    if pivot.empty:
-        return None
-
-    pivot = pivot.reindex(columns=["DraftKings", "FanDuel", "Bet365", "PrizePicks"], fill_value=None)
-    fig = px.imshow(
-        pivot,
-        aspect="auto",
-        text_auto=".2f",
-        color_continuous_scale=["#EAF1FB", "#9EC5E5", "#5FA8D3", "#1D4E89"],
-        title="Best-Line Heatmap (Lower Implied Prob = Better Price)",
-    )
-    fig.update_xaxes(side="top")
-    return style_figure(fig, height=500)
-
+    return None
 
 def plot_observed_clv(settled_or_pending_log):
     if settled_or_pending_log.empty:
@@ -1833,7 +1823,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="theme-banner"><b>Layout update:</b> light blue/white theme, darker readable text, sportsbook quick links, AI bet explanations, KPI ribbon, chart-first layout, best-line heatmap, exposure caps, line movement tracking, observed CLV, and correlation controls.</div>',
+    '<div class="theme-banner"><b>Layout update:</b> light blue/white theme, darker readable text, sportsbook quick links, AI bet explanations, KPI ribbon, chart-first layout, line-gap leaderboard, exposure caps, line movement tracking, observed CLV, and correlation controls.</div>',
     unsafe_allow_html=True,
 )
 st.markdown(
@@ -1844,7 +1834,6 @@ st.markdown(
 # -----------------------------
 # LIVE AUTO-REFRESH HERO
 # -----------------------------
-@st.fragment(run_every="15m")
 def render_live_snapshot():
     current_rows, compare_rows, error_message = get_live_board(
         leagues=league_filter,
@@ -2027,13 +2016,13 @@ with tabs[0]:
     with row1_left:
         fig = plot_bankroll_curve(settled_log, bankroll)
         if fig:
-            st.plotly_chart(fig, use_container_width=True, key="overview_bankroll_curve")
+            safe_plotly_chart(fig, "overview_bankroll_curve")
         else:
             st.info("Settle a few bets to unlock the bankroll curve.")
     with row1_right:
         fig = plot_profit_by_sportsbook(settled_log)
         if fig:
-            st.plotly_chart(fig, use_container_width=True, key="overview_profit_by_sportsbook")
+            safe_plotly_chart(fig, "overview_profit_by_sportsbook")
         else:
             st.info("No sportsbook profit chart yet.")
 
@@ -2041,13 +2030,13 @@ with tabs[0]:
     with row2_left:
         fig = plot_exposure_by_sport(final_bets_live)
         if fig:
-            st.plotly_chart(fig, use_container_width=True, key="overview_exposure_by_sport")
+            safe_plotly_chart(fig, "overview_exposure_by_sport")
         else:
             st.info("No current live exposure to chart.")
     with row2_right:
         fig = plot_hit_rate_by_confidence(settled_log)
         if fig:
-            st.plotly_chart(fig, use_container_width=True, key="overview_hit_rate_by_confidence")
+            safe_plotly_chart(fig, "overview_hit_rate_by_confidence")
         else:
             st.info("Need wins/losses to chart hit rate by confidence.")
 
@@ -2055,27 +2044,27 @@ with tabs[0]:
     with row3_left:
         fig = plot_edge_distribution(current_df)
         if fig:
-            st.plotly_chart(fig, use_container_width=True, key="overview_edge_distribution")
+            safe_plotly_chart(fig, "overview_edge_distribution")
         else:
             st.info("No final bets available for edge distribution.")
     with row3_right:
         fig = plot_line_gap_leaderboard(compare_df)
         if fig:
-            st.plotly_chart(fig, use_container_width=True, key="overview_line_gap_leaderboard")
+            safe_plotly_chart(fig, "overview_line_gap_leaderboard")
         else:
             st.info("No comparison rows available for line-gap leaderboard.")
 
     row4_left, row4_right = st.columns(2)
     with row4_left:
-        fig = plot_line_heatmap(current_df, compare_df)
+        fig = plot_observed_clv(bet_log)
         if fig:
-            st.plotly_chart(fig, use_container_width=True, key="overview_line_heatmap")
+            safe_plotly_chart(fig, "overview_observed_clv")
         else:
-            st.info("No heatmap available yet.")
+            st.info("No CLV chart available yet. Log bets and let odds update over time.")
     with row4_right:
         fig = plot_exposure_by_book(final_bets_live)
         if fig:
-            st.plotly_chart(fig, use_container_width=True, key="overview_exposure_by_book")
+            safe_plotly_chart(fig, "overview_exposure_by_book")
         else:
             st.info("No sportsbook exposure chart available.")
 
@@ -2249,9 +2238,15 @@ with tabs[2]:
         avg_gap = float(compare_df["Line Gap %"].mean()) if not compare_df.empty else 0.0
         st.metric("Average Line Gap", f"{avg_gap:.2f}%")
 
-    heatmap_fig = plot_line_heatmap(current_df, compare_df)
-    if heatmap_fig:
-        st.plotly_chart(heatmap_fig, use_container_width=True, key="compare_lines_heatmap")
+    st.markdown(
+        """
+        <div class="card">
+        This screen is focused on clean side-by-side price comparison across books.
+        The heatmap has been removed to keep the layout simpler and easier to read.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.dataframe(
         compare_df[
@@ -2641,21 +2636,21 @@ with tabs[10]:
         with results_top1:
             fig = plot_profit_by_market(settled_log)
             if fig:
-                st.plotly_chart(fig, use_container_width=True, key="results_profit_by_market")
+                safe_plotly_chart(fig, "results_profit_by_market")
         with results_top2:
             fig = plot_score_vs_pnl(settled_log)
             if fig:
-                st.plotly_chart(fig, use_container_width=True, key="results_score_vs_pnl")
+                safe_plotly_chart(fig, "results_score_vs_pnl")
 
         results_bottom1, results_bottom2 = st.columns(2)
         with results_bottom1:
             fig = plot_hit_rate_by_confidence(settled_log)
             if fig:
-                st.plotly_chart(fig, use_container_width=True, key="results_hit_rate_by_confidence")
+                safe_plotly_chart(fig, "results_hit_rate_by_confidence")
         with results_bottom2:
             fig = plot_observed_clv(bet_log)
             if fig:
-                st.plotly_chart(fig, use_container_width=True, key="results_observed_clv")
+                safe_plotly_chart(fig, "results_observed_clv")
 
         st.markdown("#### Settled Bet History")
         st.dataframe(
