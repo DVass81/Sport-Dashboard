@@ -7,15 +7,6 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 import requests
 import streamlit as st
-from zoneinfo import ZoneInfo
-from html import escape
-importfrom datetime import datetime, timezone
- re
-import xml.etree.ElementTree as ET
-
-import pandas as pd
-import requests
-import streamlit as st
 
 st.set_page_config(
     page_title="Sports Betting Dashboard",
