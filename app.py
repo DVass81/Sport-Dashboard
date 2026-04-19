@@ -2427,6 +2427,8 @@ table { color: #E2E8F0; }
 }
 </style>
 """
+if "_pending_theme" in st.session_state:
+    st.session_state["theme_choice"] = st.session_state.pop("_pending_theme")
 _theme_name = st.sidebar.selectbox(
     "Theme", list(THEMES.keys()), index=0, key="theme_choice",
     help="Color palette for the dashboard.",
@@ -3344,6 +3346,57 @@ age_min = (datetime.now(timezone.utc) - last_refresh).total_seconds() / 60.0
 age_label = f"{age_min:.0f} min" if age_min >= 1 else "just now"
 chip_cls = "cache-chip stale" if age_min >= 120 else "cache-chip"
 last_str = last_refresh.astimezone().strftime("%I:%M %p")
+
+# ---- Big team-theme toggle bar (above EDGE title) ----
+st.markdown(
+    """
+<style>
+.edge-theme-row { margin: 4px 0 6px; }
+.edge-theme-row .stButton > button {
+  width: 100%; padding: 10px 4px; border-radius: 10px;
+  font-family: "Bebas Neue","Oswald",sans-serif;
+  letter-spacing: .14em; font-size: .95rem;
+  border: 1px solid rgba(255,255,255,.10);
+  transition: transform .12s ease, box-shadow .15s ease;
+}
+.edge-theme-row .stButton > button:hover { transform: translateY(-2px); }
+.edge-theme-default  .stButton > button { background:#0F0F0F; color:#F3F4F6;
+  border-color: rgba(158,27,50,.5); }
+.edge-theme-bama     .stButton > button { background:#9E1B32; color:#fff;
+  border-color:#9E1B32; box-shadow: 0 0 14px rgba(158,27,50,.5); }
+.edge-theme-vols     .stButton > button { background:#FF8200; color:#1a0d00;
+  border-color:#FF8200; box-shadow: 0 0 14px rgba(255,130,0,.5);
+  font-weight: 800; }
+.edge-theme-active   .stButton > button {
+  outline: 2px solid #fff; outline-offset: 2px;
+}
+</style>
+    """,
+    unsafe_allow_html=True,
+)
+st.markdown("<div class='edge-theme-row'></div>", unsafe_allow_html=True)
+_tcol1, _tcol2, _tcol3 = st.columns(3)
+_btn_specs = [
+    (_tcol1, "Bloomberg",            "DEFAULT (RED/BLACK)",     "edge-theme-default"),
+    (_tcol2, "Alabama Crimson Tide", "ALABAMA - ROLL TIDE",     "edge-theme-bama"),
+    (_tcol3, "Tennessee Volunteers", "TENNESSEE - GO BIG ORANGE", "edge-theme-vols"),
+]
+for _col, _theme_id, _label, _cls in _btn_specs:
+    with _col:
+        _active = (_theme_name == _theme_id)
+        st.markdown(
+            f"<div class='{_cls} "
+            f"{'edge-theme-active' if _active else ''}'>",
+            unsafe_allow_html=True,
+        )
+        if st.button(
+            ("ACTIVE - " if _active else "") + _label,
+            key=f"theme_pill_{_theme_id}",
+            use_container_width=True,
+        ):
+            st.session_state["_pending_theme"] = _theme_id
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
 header_html = (
     "<div class='edge-header'>"
