@@ -1892,6 +1892,9 @@ def parse_event(ev, league, books_filter):
     )
 
 
+_RAW_EVENT_CACHE = {}
+
+
 def get_board(league, books_filter):
     raw, warn = fetch_events(league)
     if warn:
@@ -1901,7 +1904,125 @@ def get_board(league, books_filter):
         parsed = parse_event(ev, league, books_filter)
         if parsed:
             events.append(parsed)
+            _eid = ev.get("eventID") or ev.get("id") or ""
+            if _eid:
+                _RAW_EVENT_CACHE[_eid] = ev
+                _RAW_EVENT_CACHE[(parsed.away, parsed.home, league)] = ev
     return events, None
+
+
+def _alt_lines_for_event(raw_ev, books_filter, league):
+    """Return {'spread':[(point, side, best_book, best_am, n_books)],
+              'total': [...]}."""
+    if not raw_ev:
+        return {"spread": [], "total": []}
+    odds = raw_ev.get("odds") or {}
+    home = _team_name(raw_ev, "home")
+    away = _team_name(raw_ev, "away")
+    by_market = {"spread": {}, "total": {}}
+    for _odd_id, info in odds.items():
+        if (info.get("periodID") or "").lower() != "game":
+            continue
+        bt = (info.get("betTypeID") or "").lower()
+        if bt not in ("sp", "spread", "ou", "total"):
+            continue
+        market_key = "spread" if bt in ("sp", "spread") else "total"
+        side = (info.get("sideID") or "").lower()
+        try:
+            point = float(info.get("bookSpread") or info.get("bookOverUnder")
+                          or info.get("fairSpread") or info.get("fairOverUnder")
+                          or info.get("point") or 0)
+        except Exception:
+            continue
+        if point == 0 and bt in ("sp", "spread"):
+            continue
+        prices = []
+        for book_id, b in (info.get("byBookmaker") or {}).items():
+            if books_filter and book_id.lower() not in books_filter:
+                continue
+            if not b.get("available", True):
+                continue
+            am = b.get("odds")
+            if am is None:
+                continue
+            try:
+                ai = int(round(float(am)))
+                prices.append((book_id, ai))
+            except Exception:
+                continue
+        if not prices:
+            continue
+        best = max(prices, key=lambda x: american_to_decimal(x[1]))
+        side_label = side
+        if market_key == "spread":
+            if side == "home":
+                side_label = home
+                signed_pt = +point if point > 0 else point
+            elif side == "away":
+                side_label = away
+                signed_pt = -point if point > 0 else point
+            else:
+                signed_pt = point
+        else:
+            side_label = side.capitalize()
+            signed_pt = point
+        bucket = by_market[market_key].setdefault(
+            (round(signed_pt, 2), side_label), [],
+        )
+        bucket.append((best[0], best[1], len(prices)))
+    out = {"spread": [], "total": []}
+    for (pt, sd), entries in by_market["spread"].items():
+        if not entries:
+            continue
+        b = max(entries, key=lambda e: american_to_decimal(e[1]))
+        out["spread"].append((pt, sd, b[0], b[1], b[2]))
+    for (pt, sd), entries in by_market["total"].items():
+        if not entries:
+            continue
+        b = max(entries, key=lambda e: american_to_decimal(e[1]))
+        out["total"].append((pt, sd, b[0], b[1], b[2]))
+    out["spread"].sort(key=lambda r: (r[1], r[0]))
+    out["total"].sort(key=lambda r: (r[1], r[0]))
+    return out
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_pga_leaderboard():
+    """Pull current PGA leaderboard from ESPN (free)."""
+    try:
+        r = requests.get(
+            "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard",
+            timeout=8,
+        )
+        if r.status_code != 200:
+            return None, None
+        data = r.json() or {}
+        events = data.get("events") or []
+        if not events:
+            return None, None
+        ev = events[0]
+        name = ev.get("name") or "PGA event"
+        comp = (ev.get("competitions") or [{}])[0]
+        status = (comp.get("status") or {}).get("type") or {}
+        rd = status.get("description") or status.get("name") or ""
+        rows = []
+        for c in comp.get("competitors") or []:
+            ath = c.get("athlete") or {}
+            try:
+                pos = c.get("status", {}).get("position", {}).get("displayName") or c.get("statusText") or ""
+                score = c.get("score") or c.get("status", {}).get("totalScore") or "E"
+                thru = c.get("status", {}).get("displayValue") or ""
+            except Exception:
+                pos, score, thru = "", "", ""
+            rows.append({
+                "pos": pos[:4] if pos else "-",
+                "name": ath.get("displayName") or "-",
+                "score": str(score),
+                "thru": str(thru)[:6] if thru else "",
+            })
+        return {"name": name, "round": rd, "rows": rows[:18]}, None
+    except Exception as e:
+        return None, str(e)
 
 
 def _pick_label(oc, market_type):
@@ -2429,6 +2550,94 @@ st.markdown(
   font-size:.78rem; letter-spacing:.08em; text-transform:uppercase;
 }
 
+/* ---- Slot-machine shuffle on best-price flips (#3) ---- */
+b[style*="#10B981"] {
+  animation: edgeShuffle 0.65s ease-out 1;
+  display: inline-block;
+}
+@keyframes edgeShuffle {
+  0%   { opacity: 0; transform: translateY(-10px) scale(.85); filter: blur(2px); }
+  35%  { opacity: 1; transform: translateY(4px) scale(1.08); filter: blur(0); }
+  70%  { transform: translateY(-1px) scale(.98); }
+  100% { transform: translateY(0) scale(1); }
+}
+
+/* ---- Mobile bottom status bar (#4) ---- */
+.edge-mobar {
+  position: fixed; bottom: 0; left: 0; right: 0; z-index: 9990;
+  display: none;
+  background: linear-gradient(180deg, rgba(15,15,15,.85), rgba(0,0,0,.96));
+  backdrop-filter: blur(14px);
+  border-top: 1px solid rgba(220,38,38,.4);
+  padding: 8px 12px 10px;
+  font-family: "Bebas Neue", "Oswald", sans-serif;
+}
+.edge-mobar-row {
+  display: grid; grid-template-columns: 1fr 1fr 1fr 1fr;
+  gap: 8px; align-items: center; text-align: center;
+}
+.edge-mobar-cell { color: #9CA3AF; font-size: .65rem; letter-spacing: .12em; }
+.edge-mobar-cell .v {
+  display: block; font-size: 1.1rem; color: #F3F4F6;
+  font-variant-numeric: tabular-nums; letter-spacing: .04em;
+}
+.edge-mobar-cell .v.green { color: #10B981; }
+.edge-mobar-cell .v.red   { color: #DC2626; }
+@media (max-width: 760px) {
+  .edge-mobar { display: block; }
+  section[data-testid="stMain"] { padding-bottom: 96px !important; }
+}
+
+/* ---- Alt-line shopper table (#29) ---- */
+.edge-altwrap { font-size: .82rem; }
+.edge-altwrap table { width: 100%; border-collapse: collapse; }
+.edge-altwrap th, .edge-altwrap td {
+  padding: 5px 8px; border-bottom: 1px solid rgba(255,255,255,.05);
+  text-align: left;
+}
+.edge-altwrap th { color: #9CA3AF; font-weight: 600; font-size: .72rem;
+  letter-spacing: .08em; text-transform: uppercase; }
+.edge-altwrap td.num { font-variant-numeric: tabular-nums; }
+.edge-altwrap td.best { color: #10B981; font-weight: 700; }
+
+/* ---- SGP builder (#30) ---- */
+.edge-sgp-warn {
+  background: rgba(220,38,38,.08);
+  border: 1px solid rgba(220,38,38,.3);
+  border-radius: 8px; padding: 8px 12px; font-size: .85rem; color: #F3F4F6;
+  margin: 8px 0;
+}
+
+/* ---- PGA leaderboard (#38) ---- */
+.edge-pga {
+  background: linear-gradient(180deg, rgba(16,185,129,.06), rgba(0,0,0,.2));
+  border: 1px solid rgba(16,185,129,.25);
+  border-radius: 10px; padding: 10px 14px;
+}
+.edge-pga h4 { color:#10B981; margin: 0 0 6px;
+  font-family: "Bebas Neue", "Oswald", sans-serif; letter-spacing: .14em; }
+.edge-pga table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+.edge-pga th, .edge-pga td {
+  padding: 4px 8px; border-bottom: 1px solid rgba(255,255,255,.04);
+}
+.edge-pga th { color: #9CA3AF; font-size: .7rem; text-align: left;
+  letter-spacing: .08em; text-transform: uppercase; }
+.edge-pga td.score-up { color: #DC2626; font-weight: 700; }
+.edge-pga td.score-dn { color: #10B981; font-weight: 700; }
+
+/* ---- Siri shortcut card (#75) ---- */
+.edge-siri {
+  background: rgba(59,130,246,.08);
+  border: 1px solid rgba(59,130,246,.3);
+  border-radius: 8px; padding: 10px 12px; font-size: .82rem;
+  color: #DBEAFE; margin: 6px 0;
+}
+.edge-siri code {
+  display:block; word-break: break-all;
+  background: rgba(0,0,0,.4); padding: 6px 8px; border-radius: 6px;
+  margin-top: 6px; font-size: .72rem; color:#F3F4F6;
+}
+
 /* ---- Lava lamp blobs (#22) ---- */
 .edge-lava {
   position: fixed; inset: 0; z-index: -1; pointer-events: none;
@@ -2657,6 +2866,26 @@ if not st.session_state.get("splash_shown"):
         unsafe_allow_html=True,
     )
 
+# ---- iOS Siri / URL deeplink prefill (#75) ----
+try:
+    _qp = dict(st.query_params)
+except Exception:
+    _qp = {}
+if _qp.get("addBet") or _qp.get("desc"):
+    try:
+        _d_desc = _qp.get("addBet") or _qp.get("desc") or ""
+        _d_book = _qp.get("book") or "DraftKings"
+        _d_odds = int(float(_qp.get("odds") or -110))
+        _d_stake = float(_qp.get("stake") or 5)
+        queue_prefill_bet(_d_desc, _d_book, _d_odds, _d_stake)
+        try:
+            st.query_params.clear()
+        except Exception:
+            pass
+        st.toast("Bet prefilled from shortcut - check the Bankroll tab.")
+    except Exception:
+        pass
+
 with st.sidebar:
     _ulabel = st.session_state.get("edge_user_label", "default")
     st.markdown(
@@ -2668,6 +2897,39 @@ with st.sidebar:
         for _k in ("edge_user", "edge_user_label", "splash_shown"):
             st.session_state.pop(_k, None)
         st.rerun()
+
+    # ---- iOS Siri shortcut card (#75) ----
+    with st.expander("iOS Siri shortcut", expanded=False):
+        _app_url = ""
+        try:
+            _app_url = (st.context.headers.get("origin")
+                        or st.context.headers.get("host") or "")
+            if _app_url and not _app_url.startswith("http"):
+                _app_url = "https://" + _app_url
+        except Exception:
+            pass
+        if not _app_url:
+            _app_url = "https://YOUR-APP.streamlit.app"
+        _siri_url = (
+            f"{_app_url}/?addBet=Lakers+ML"
+            f"&book=DraftKings&odds=-110&stake=5"
+        )
+        st.markdown(
+            f"""<div class='edge-siri'>
+Tell Siri "Hey Siri, log a bet" and it pre-fills the Add Bet form.
+<br><br><b>Setup once on iPhone:</b><br>
+1. Open <b>Shortcuts</b> app, tap the <b>+</b><br>
+2. Add action: <b>Open URLs</b><br>
+3. Paste this URL template (edit the bet text before saving, or use
+   "Ask Each Time" tokens for prompt-on-run):
+<code>{_siri_url}</code>
+4. Tap <b>Add to Siri</b>, name it "Log a bet". Done.<br><br>
+Tapping the shortcut opens this app and auto-fills the Add Bet form on the
+Bankroll tab. Params: <code>addBet</code>, <code>book</code>,
+<code>odds</code>, <code>stake</code>.
+</div>""",
+            unsafe_allow_html=True,
+        )
     st.markdown("---")
     st.markdown("### Bankroll")
     bankroll = st.number_input("Bankroll ($)", min_value=10.0, value=500.0, step=10.0)
@@ -3241,6 +3503,97 @@ with tab_props:
                 if st.session_state.get(why_key):
                     st.info(st.session_state[why_key])
 
+    # ---- Same-Game Parlay (SGP) builder (#30) ----
+    st.markdown("---")
+    st.subheader("Same-Game Parlay builder")
+    st.caption(
+        "Pick 2-4 props from the SAME game. Books treat them as one ticket. "
+        "Combined odds shown assume independence - real SGP prices are "
+        "shorter because legs in one game are correlated."
+    )
+    if not props_rows:
+        st.info("Run a board scan above to populate props.")
+    else:
+        _games = sorted({r["matchup"] for r in props_rows})
+        _sgp_game = st.selectbox(
+            "Game", _games, key="sgp_game_pick",
+        )
+        _sgp_pool = [r for r in props_rows if r["matchup"] == _sgp_game]
+        _sgp_labels = [
+            f"{r['player']} {r['stat']} {r['side']} {r['line']:g} "
+            f"@ {format_american(r['price'])} ({r['book']})"
+            for r in _sgp_pool
+        ]
+        _sgp_choices = st.multiselect(
+            "Pick 2-4 legs", _sgp_labels,
+            max_selections=4, key="sgp_legs_pick",
+        )
+        if len(_sgp_choices) >= 2:
+            _picked = [
+                _sgp_pool[i] for i, lb in enumerate(_sgp_labels)
+                if lb in _sgp_choices
+            ]
+            _decs = [american_to_decimal(int(r["price"])) for r in _picked]
+            _combined = 1.0
+            for d in _decs:
+                _combined *= d
+            if _combined > 2:
+                _combined_am = int(round((_combined - 1) * 100))
+                _combined_am_str = f"+{_combined_am}"
+            else:
+                _combined_am = int(round(-100 / max(0.001, _combined - 1)))
+                _combined_am_str = f"{_combined_am}"
+            _sgp_stake = st.number_input(
+                "SGP stake ($)", min_value=float(min_bet),
+                max_value=float(max_bet), value=float(min_bet),
+                step=1.0, key="sgp_stake_in",
+            )
+            _to_win = _sgp_stake * (_combined - 1.0)
+            _book_set = {r["book"] for r in _picked}
+            st.markdown(
+                f"<div style='font-size:.95rem;margin:8px 0'>"
+                f"Combined (independence): "
+                f"<b style='color:#10B981'>{_combined_am_str}</b> "
+                f"&middot; Decimal <b>{_combined:.2f}</b> "
+                f"&middot; Stake ${_sgp_stake:.2f} -> "
+                f"To win <b style='color:#10B981'>${_to_win:.2f}</b>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            if len(_book_set) > 1:
+                st.markdown(
+                    "<div class='edge-sgp-warn'>WARNING: legs span "
+                    f"<b>{len(_book_set)}</b> different books "
+                    f"({', '.join(sorted(_book_set))}). A real Same-Game "
+                    "Parlay must be built at one sportsbook - re-pick all "
+                    "legs from the same book to actually place this.</div>",
+                    unsafe_allow_html=True,
+                )
+            st.markdown(
+                "<div class='edge-sgp-warn'>Correlation warning: "
+                "props on the same game are correlated (e.g. QB pass yds "
+                "OVER + WR rec yds OVER). Books shorten SGP prices to "
+                "account for this. Expected real payout is "
+                "<b>10-35% lower</b> than the independence number above.</div>",
+                unsafe_allow_html=True,
+            )
+            _sgp_desc = "SGP: " + " + ".join([
+                f"{r['player']} {r['stat']} {r['side']} {r['line']:g}"
+                for r in _picked
+            ]) + f" - {_sgp_game}"
+            if st.button(
+                "Lock in SGP", key="sgp_lock_btn", type="secondary",
+            ):
+                _book_for_log = (
+                    list(_book_set)[0] if len(_book_set) == 1
+                    else "DraftKings"
+                )
+                queue_prefill_bet(
+                    _sgp_desc, _book_for_log, _combined_am, _sgp_stake,
+                )
+        elif _sgp_choices:
+            st.info("Pick at least 2 legs.")
+
 with tab_pp_board:
     st.subheader("PrizePicks Board Builder")
     st.caption(
@@ -3451,6 +3804,44 @@ with tab_parlay:
 
 with tab_board:
     league_id = st.selectbox("League", [lg["id"] for lg in LEAGUES], index=0)
+
+    # ---- PGA leaderboard (#38) ----
+    with st.expander("PGA leaderboard (live)", expanded=False):
+        _pga, _pga_err = fetch_pga_leaderboard()
+        if _pga_err:
+            st.caption(f"Could not reach ESPN golf feed: {_pga_err}")
+        elif not _pga or not _pga.get("rows"):
+            st.caption("No active PGA tournament right now.")
+        else:
+            _rows_html = ""
+            for r in _pga["rows"]:
+                _sc = (r.get("score") or "E").strip()
+                _cls = "score-up" if _sc.startswith("+") else (
+                    "score-dn" if _sc.startswith("-") else ""
+                )
+                _rows_html += (
+                    f"<tr><td>{r.get('pos','-')}</td>"
+                    f"<td>{r.get('name','-')}</td>"
+                    f"<td class='{_cls}'>{_sc}</td>"
+                    f"<td>{r.get('thru','')}</td></tr>"
+                )
+            st.markdown(
+                f"<div class='edge-pga'>"
+                f"<h4>{_pga['name']} &middot; {_pga.get('round','')}</h4>"
+                f"<table>"
+                f"<tr><th>Pos</th><th>Player</th>"
+                f"<th>Score</th><th>Thru</th></tr>"
+                f"{_rows_html}"
+                f"</table>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                "Live from ESPN free golf feed. Cross-reference with "
+                "outright winner / top-5 / top-10 markets in your sportsbook. "
+                "DraftKings/FanDuel daily-fantasy salaries are not exposed via "
+                "a public API; use this leaderboard alongside their lobby."
+            )
 
     # ---- Live scoreboard strip (#33) ----
     try:
@@ -3690,6 +4081,58 @@ with tab_board:
                     html += "</tr>"
                 html += "</table>"
                 st.markdown(html, unsafe_allow_html=True)
+
+            # ---- Alt-line shopper (#29) ----
+            with st.expander("Alt lines (spreads & totals)", expanded=False):
+                _raw_ev = (
+                    _RAW_EVENT_CACHE.get((ev.away, ev.home, league_id))
+                )
+                _alts = _alt_lines_for_event(_raw_ev, books_filter, league_id)
+                if not _alts["spread"] and not _alts["total"]:
+                    st.caption(
+                        "No alt-spread or alt-total markets returned from "
+                        "your selected sportsbooks for this game."
+                    )
+                else:
+                    if _alts["spread"]:
+                        st.caption("Alt spreads")
+                        _h = (
+                            "<div class='edge-altwrap'><table>"
+                            "<tr><th>Side</th><th>Line</th>"
+                            "<th>Best book</th><th>Best price</th>"
+                            "<th>Books</th></tr>"
+                        )
+                        for pt, sd, bk, am, n in _alts["spread"][:30]:
+                            _line_str = f"{pt:+g}"
+                            _h += (
+                                f"<tr><td>{sd}</td>"
+                                f"<td class='num'>{_line_str}</td>"
+                                f"<td>{bk}</td>"
+                                f"<td class='num best'>"
+                                f"{format_american(am)}</td>"
+                                f"<td class='num'>{n}</td></tr>"
+                            )
+                        _h += "</table></div>"
+                        st.markdown(_h, unsafe_allow_html=True)
+                    if _alts["total"]:
+                        st.caption("Alt totals")
+                        _h = (
+                            "<div class='edge-altwrap'><table>"
+                            "<tr><th>Side</th><th>Line</th>"
+                            "<th>Best book</th><th>Best price</th>"
+                            "<th>Books</th></tr>"
+                        )
+                        for pt, sd, bk, am, n in _alts["total"][:30]:
+                            _h += (
+                                f"<tr><td>{sd}</td>"
+                                f"<td class='num'>{pt:g}</td>"
+                                f"<td>{bk}</td>"
+                                f"<td class='num best'>"
+                                f"{format_american(am)}</td>"
+                                f"<td class='num'>{n}</td></tr>"
+                            )
+                        _h += "</table></div>"
+                        st.markdown(_h, unsafe_allow_html=True)
 
 @st.cache_data(ttl=120, show_spinner=False)
 def _h2h_leaderboard():
@@ -4560,3 +5003,70 @@ with tab_ai:
             st.session_state["ai_chat"] = []
             st.session_state.pop("last_reply", None)
             st.rerun()
+
+# ---- Mobile bottom status bar (#4) ----
+try:
+    _mob_bets = db_load_bets()
+    _today_iso = datetime.now(timezone.utc).date().isoformat()
+    _mob_open = [b for b in _mob_bets if b["status"] == "open"]
+    _mob_today_open = [b for b in _mob_open if b["date"] == _today_iso]
+    _mob_settled = [b for b in _mob_bets if b["status"] != "open"]
+    _mob_today_settled = [
+        b for b in _mob_settled
+        if (b.get("settled_at") or b.get("date") or "").startswith(_today_iso)
+    ]
+    _mob_today_pnl = sum(
+        b["to_win"] if b["status"] == "won" else -b["stake"]
+        for b in _mob_today_settled
+    )
+    _mob_pnl = sum(
+        b["to_win"] if b["status"] == "won" else -b["stake"]
+        for b in _mob_settled
+    )
+    _mob_equity = float(bankroll) + _mob_pnl
+    _streak_kind = None
+    _streak_n = 0
+    for b in sorted(
+        _mob_settled,
+        key=lambda x: x.get("settled_at") or x.get("date") or "",
+        reverse=True,
+    ):
+        if b["status"] == "push":
+            continue
+        if _streak_kind is None:
+            _streak_kind = b["status"]
+            _streak_n = 1
+        elif b["status"] == _streak_kind:
+            _streak_n += 1
+        else:
+            break
+    _streak_label = (
+        f"{_streak_n}{(_streak_kind or '')[0].upper()}"
+        if _streak_kind else "-"
+    )
+    _streak_cls = (
+        "green" if _streak_kind == "won"
+        else ("red" if _streak_kind == "lost" else "")
+    )
+    _today_cls = (
+        "green" if _mob_today_pnl > 0
+        else ("red" if _mob_today_pnl < 0 else "")
+    )
+    _eq_cls = "green" if _mob_equity >= float(bankroll) else "red"
+    st.markdown(
+        f"""<div class='edge-mobar'>
+<div class='edge-mobar-row'>
+  <div class='edge-mobar-cell'>BANK
+    <span class='v {_eq_cls}'>${_mob_equity:,.0f}</span></div>
+  <div class='edge-mobar-cell'>TODAY
+    <span class='v {_today_cls}'>${_mob_today_pnl:+,.0f}</span></div>
+  <div class='edge-mobar-cell'>OPEN
+    <span class='v'>{len(_mob_open)}</span></div>
+  <div class='edge-mobar-cell'>STREAK
+    <span class='v {_streak_cls}'>{_streak_label}</span></div>
+</div>
+</div>""",
+        unsafe_allow_html=True,
+    )
+except Exception:
+    pass
