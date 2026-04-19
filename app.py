@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+from html import escape
+import xml.etree.ElementTree as ET
 
 import pandas as pd
 import requests
@@ -26,6 +28,20 @@ BOOK_URLS = {
 }
 MAIN_MARKETS = {"Moneyline", "Spread", "Total"}
 PROP_MARKETS = {"Player Prop", "DFS Prop", "Team Total"}
+NEWS_FEEDS = {
+    "Top Headlines": "https://www.espn.com/espn/rss/news",
+    "NFL": "https://www.espn.com/espn/rss/nfl/news",
+    "NBA": "https://www.espn.com/espn/rss/nba/news",
+    "MLB": "https://www.espn.com/espn/rss/mlb/news",
+    "NHL": "https://www.espn.com/espn/rss/nhl/news",
+    "College Football": "https://www.espn.com/espn/rss/ncf/news",
+}
+LEAGUE_TO_NEWS = {
+    "NFL": "NFL",
+    "NBA": "NBA",
+    "MLB": "MLB",
+    "NHL": "NHL",
+}
 
 
 # -----------------------------
@@ -1028,6 +1044,98 @@ st.markdown(
         font-weight: 900;
         margin-top: 6px;
     }
+
+    .ticker-wrap {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        background: linear-gradient(135deg, #ffffff 0%, #eef5ff 100%);
+        border: 1px solid #d3e4fa;
+        border-radius: 18px;
+        padding: 12px 16px;
+        box-shadow: 0 8px 18px rgba(22, 59, 104, 0.07);
+        margin: 12px 0 16px 0;
+        overflow: hidden;
+    }
+
+    .ticker-label {
+        flex: 0 0 auto;
+        color: #173b67;
+        font-size: 0.82rem;
+        font-weight: 900;
+        letter-spacing: 0.06em;
+        background: #dcecff;
+        border: 1px solid #bdd7fa;
+        border-radius: 999px;
+        padding: 7px 12px;
+    }
+
+    .ticker-track {
+        position: relative;
+        overflow: hidden;
+        white-space: nowrap;
+        width: 100%;
+    }
+
+    .ticker-move {
+        display: inline-block;
+        white-space: nowrap;
+        color: #153457;
+        font-size: 0.95rem;
+        font-weight: 700;
+        padding-left: 100%;
+        animation: ticker-slide 34s linear infinite;
+    }
+
+    @keyframes ticker-slide {
+        0% { transform: translateX(0); }
+        100% { transform: translateX(-100%); }
+    }
+
+    .news-card {
+        background: linear-gradient(135deg, #ffffff 0%, #f5f9ff 100%);
+        border: 1px solid #d6e5f6;
+        border-radius: 18px;
+        padding: 16px 18px;
+        box-shadow: 0 10px 20px rgba(22, 59, 104, 0.06);
+        margin-bottom: 12px;
+    }
+
+    .news-feed-tag {
+        display: inline-block;
+        background: #e8f1ff;
+        color: #1b4f89;
+        border: 1px solid #c9dcfb;
+        border-radius: 999px;
+        font-size: 0.74rem;
+        font-weight: 800;
+        padding: 4px 9px;
+        margin-bottom: 8px;
+    }
+
+    .news-title a {
+        color: #133b67;
+        font-size: 1.02rem;
+        font-weight: 900;
+        text-decoration: none;
+    }
+
+    .news-title a:hover {
+        text-decoration: underline;
+    }
+
+    .news-meta {
+        color: #607a99;
+        font-size: 0.82rem;
+        font-weight: 700;
+        margin-top: 6px;
+    }
+
+    .news-desc {
+        color: #334f70;
+        font-size: 0.9rem;
+        margin-top: 8px;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -1200,6 +1308,7 @@ def render_live_dashboard():
 
     tabs = st.tabs([
         "Home",
+        "Sports News",
         "Best Bets",
         "DraftKings",
         "FanDuel",
@@ -1326,6 +1435,55 @@ def render_live_dashboard():
         st.markdown('</div>', unsafe_allow_html=True)
 
     with tabs[1]:
+        st.markdown('<div class="section-title">Sports News</div>', unsafe_allow_html=True)
+        news_col1, news_col2 = st.columns([1.5, 1])
+
+        with news_col1:
+            news_feed_choice = st.selectbox(
+                "Choose a headline feed",
+                options=get_news_feed_names(league_filter),
+                key="sports_news_feed_select",
+            )
+            selected_news = fetch_news_feed(news_feed_choice, limit=12)
+            if not selected_news:
+                st.info("No headlines available right now.")
+            else:
+                for item in selected_news:
+                    desc = item.get("description", "") or "Fresh headline feed from ESPN."
+                    st.markdown(
+                        f"""
+                        <div class="news-card">
+                            <div class="news-feed-tag">Provided by ESPN RSS · {escape(item.get('feed', 'News'))}</div>
+                            <div class="news-title"><a href="{item.get('link', '#')}" target="_blank">{escape(item.get('title', 'Headline'))}</a></div>
+                            <div class="news-meta">{escape(item.get('pub_date', ''))}</div>
+                            <div class="news-desc">{escape(desc)}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+        with news_col2:
+            st.markdown('<div class="section-title">Headline Snapshot</div>', unsafe_allow_html=True)
+            st.markdown(
+                """
+                <div class="card">
+                • Headlines are pulled from ESPN's official RSS feeds.<br>
+                • This tab links straight to the source article.<br>
+                • The ticker above rotates the freshest loaded headlines.<br>
+                • The feed list follows your selected leagues plus Top Headlines.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            if news_items:
+                feed_counts = pd.Series([item.get("feed", "News") for item in news_items]).value_counts()
+                st.markdown('<div class="section-title">Loaded Headlines by Feed</div>', unsafe_allow_html=True)
+                st.bar_chart(feed_counts)
+            else:
+                st.info("No news chart data available.")
+
+    with tabs[2]:
         st.markdown('<div class="section-title">Best Bets Board</div>', unsafe_allow_html=True)
 
         display_df = filtered_df.copy()
