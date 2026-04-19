@@ -1089,7 +1089,7 @@ def queue_prefill_bet(desc, book, odds, stake):
         "desc": desc, "book": book,
         "odds": int(odds), "stake": float(stake or 0.0),
     }
-    st.toast(f"Queued: {desc[:60]} - open Bankroll to confirm.", icon="LOCK")
+    st.toast(f"Queued: {desc[:60]} - open Bankroll to confirm.", icon="🔒")
 
 
 _GRADE_LEAGUE_MAP = {
@@ -5192,7 +5192,7 @@ with tab_bank:
     if pre:
         st.info(
             f"Pick queued from a Lock-it-in button. Review and click Add bet.",
-            icon="LOCK",
+            icon="🔒",
         )
     with st.form("log_bet", clear_on_submit=True):
         f = st.columns([2, 2, 1, 1, 1])
