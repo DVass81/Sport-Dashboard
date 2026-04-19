@@ -1,3 +1,4 @@
+import html
 import os
 import uuid
 from collections import defaultdict
@@ -1189,6 +1190,22 @@ def style_figure(fig, height=350):
     return fig
 
 
+def render_kpi_card(label, value, delta=None, note=None):
+    label = html.escape(str(label))
+    value = html.escape(str(value))
+    delta_html = f'<div class="kpi-card-delta">{html.escape(str(delta))}</div>' if delta not in (None, "") else ''
+    note_html = f'<div class="kpi-card-note">{html.escape(str(note))}</div>' if note not in (None, "") else ''
+    st.markdown(
+        f"""
+        <div class="kpi-card">
+            <div class="kpi-card-label">{label}</div>
+            <div class="kpi-card-value">{value}</div>
+            {delta_html}
+            {note_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # -----------------------------
@@ -1632,6 +1649,44 @@ st.markdown(
         font-weight: 600;
     }
 
+    .kpi-card {
+        background: rgba(255,255,255,0.98);
+        border: 1px solid rgba(11,37,69,0.10);
+        border-radius: 16px;
+        padding: 14px 16px;
+        box-shadow: 0 8px 16px rgba(11,37,69,0.08);
+        min-height: 118px;
+        margin-bottom: 10px;
+    }
+
+    .kpi-card-label {
+        color: #1D4E89;
+        font-size: 0.88rem;
+        font-weight: 800;
+        margin-bottom: 8px;
+    }
+
+    .kpi-card-value {
+        color: #0B2545;
+        font-size: 1.55rem;
+        font-weight: 900;
+        line-height: 1.2;
+        margin-bottom: 6px;
+    }
+
+    .kpi-card-delta {
+        color: #1D4E89;
+        font-size: 0.92rem;
+        font-weight: 700;
+        margin-bottom: 4px;
+    }
+
+    .kpi-card-note {
+        color: #486581;
+        font-size: 0.80rem;
+        font-weight: 600;
+    }
+
     .stMetric {
         background: rgba(255,255,255,0.97);
         border: 1px solid rgba(11,37,69,0.08);
@@ -1961,32 +2016,24 @@ beat_market_count = int((bet_log["Observed CLV %"] > 0).sum()) if not bet_log.em
 
 k1, k2, k3, k4 = st.columns(4)
 with k1:
-    st.metric("Current Bankroll", f"${current_bankroll:,.2f}", delta=f"${realized_pnl:,.2f}")
-    st.markdown('<div class="kpi-note">delta = realized P/L</div>', unsafe_allow_html=True)
+    render_kpi_card("Current Bankroll", f"${current_bankroll:,.2f}", delta=f"${realized_pnl:,.2f}", note="delta = realized P/L")
 with k2:
-    st.metric("ROI", f"{roi:.1f}%", delta=f"Win rate {win_rate:.1f}%")
-    st.markdown('<div class="kpi-note">settled bets only</div>', unsafe_allow_html=True)
+    render_kpi_card("ROI", f"{roi:.1f}%", delta=f"Win rate {win_rate:.1f}%", note="settled bets only")
 with k3:
-    st.metric("Live Final Bets", int(len(final_bets_live)), delta=f"Avg score {avg_score_live:.2f}")
-    st.markdown('<div class="kpi-note">ranked after all filters and caps</div>', unsafe_allow_html=True)
+    render_kpi_card("Live Final Bets", int(len(final_bets_live)), delta=f"Avg score {avg_score_live:.2f}", note="ranked after all filters and caps")
 with k4:
     exposure_delta = f"{(open_suggested_risk / max_total_exposure * 100):.0f}% of cap" if max_total_exposure > 0 else "0% of cap"
-    st.metric("Open Suggested Risk", f"${open_suggested_risk:,.0f}", delta=exposure_delta)
-    st.markdown('<div class="kpi-note">live board exposure, not logged tickets</div>', unsafe_allow_html=True)
+    render_kpi_card("Open Suggested Risk", f"${open_suggested_risk:,.0f}", delta=exposure_delta, note="live board exposure, not logged tickets")
 
 k5, k6, k7, k8 = st.columns(4)
 with k5:
-    st.metric("Strong Shop Alerts", strong_shop_alerts, delta=f"Avg edge {avg_edge_live:.2f}%")
-    st.markdown('<div class="kpi-note">bigger line gaps across books</div>', unsafe_allow_html=True)
+    render_kpi_card("Strong Shop Alerts", strong_shop_alerts, delta=f"Avg edge {avg_edge_live:.2f}%", note="bigger line gaps across books")
 with k6:
-    st.metric("Pending Logged Risk", f"${open_logged_risk:,.2f}", delta=f"{len(pending_log)} pending")
-    st.markdown('<div class="kpi-note">from tracked bets only</div>', unsafe_allow_html=True)
+    render_kpi_card("Pending Logged Risk", f"${open_logged_risk:,.2f}", delta=f"{len(pending_log)} pending", note="from tracked bets only")
 with k7:
-    st.metric("Observed CLV", f"{avg_observed_clv:.2f}%", delta=f"{beat_market_count} beating market")
-    st.markdown('<div class="kpi-note">latest seen line vs logged price</div>', unsafe_allow_html=True)
+    render_kpi_card("Observed CLV", f"{avg_observed_clv:.2f}%", delta=f"{beat_market_count} beating market", note="latest seen line vs logged price")
 with k8:
-    st.metric("Passes / Correlation", int(len(pass_bets_live)), delta="risk controls active")
-    st.markdown('<div class="kpi-note">filtered out by logic or exposure</div>', unsafe_allow_html=True)
+    render_kpi_card("Passes / Correlation", int(len(pass_bets_live)), delta="risk controls active", note="filtered out by logic or exposure")
 
 # -----------------------------
 # TABS
@@ -2227,16 +2274,16 @@ with tabs[2]:
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric("Strong Shop Alerts", strong_shop_alerts)
+        render_kpi_card("Strong Shop Alerts", strong_shop_alerts)
     with c2:
         good_shop = int((compare_df["Shop Alert"] == "Good Shop").sum()) if not compare_df.empty else 0
-        st.metric("Good Shop Alerts", good_shop)
+        render_kpi_card("Good Shop Alerts", good_shop)
     with c3:
         final_compare_bets = int((compare_df["Final Status"] == "Bet").sum()) if not compare_df.empty else 0
-        st.metric("Best-Book Final Bets", final_compare_bets)
+        render_kpi_card("Best-Book Final Bets", final_compare_bets)
     with c4:
         avg_gap = float(compare_df["Line Gap %"].mean()) if not compare_df.empty else 0.0
-        st.metric("Average Line Gap", f"{avg_gap:.2f}%")
+        render_kpi_card("Average Line Gap", f"{avg_gap:.2f}%")
 
     st.markdown(
         """
@@ -2351,13 +2398,13 @@ def render_book_tab(book_name):
 
     bx1, bx2, bx3 = st.columns(3)
     with bx1:
-        st.metric("Final Bets", int(len(book_final)))
+        render_kpi_card(f"{book_name} Final Bets", int(len(book_final)))
     with bx2:
         avg_edge_book = float(book_final["Edge %"].mean()) if not book_final.empty else 0.0
-        st.metric("Average Edge", f"{avg_edge_book:.2f}%")
+        render_kpi_card(f"{book_name} Average Edge", f"{avg_edge_book:.2f}%")
     with bx3:
         open_book_risk = float(book_final["Stake To Bet"].sum()) if not book_final.empty else 0.0
-        st.metric("Open Suggested Risk", f"${open_book_risk:,.0f}")
+        render_kpi_card(f"{book_name} Open Risk", f"${open_book_risk:,.0f}")
 
     if book_df.empty:
         st.warning(f"No rows currently available for {book_name}.")
@@ -2691,13 +2738,13 @@ with tabs[11]:
 
     b1, b2, b3, b4 = st.columns(4)
     with b1:
-        st.metric("Starting Bankroll", f"${bankroll:,.2f}")
+        render_kpi_card("Starting Bankroll", f"${bankroll:,.2f}")
     with b2:
-        st.metric("Current Bankroll", f"${current_bankroll:,.2f}", delta=f"${realized_pnl:,.2f}")
+        render_kpi_card("Current Bankroll", f"${current_bankroll:,.2f}", delta=f"${realized_pnl:,.2f}")
     with b3:
-        st.metric("Logged Open Risk", f"${open_logged_risk:,.2f}")
+        render_kpi_card("Logged Open Risk", f"${open_logged_risk:,.2f}")
     with b4:
-        st.metric("Live Suggested Risk", f"${open_suggested_risk:,.2f}", delta=f"{(open_suggested_risk / max_total_exposure * 100):.0f}% of cap" if max_total_exposure > 0 else "0% of cap")
+        render_kpi_card("Live Suggested Risk", f"${open_suggested_risk:,.2f}", delta=f"{(open_suggested_risk / max_total_exposure * 100):.0f}% of cap" if max_total_exposure > 0 else "0% of cap")
 
     risk_left, risk_right = st.columns(2)
     with risk_left:
