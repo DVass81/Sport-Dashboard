@@ -1059,9 +1059,12 @@ def achievements_html(badges):
         )
     return (
         "<div class='ach-wrap'>"
-        f"<div class='ach-head'>ACHIEVEMENTS "
-        f"<span class='ach-count'>{earned_count}/{len(badges)}</span></div>"
-        f"<div class='ach-grid'>{''.join(chips)}</div>"
+        f"<div class='edge-trophy-head'>"
+        f"<span class='sparkle'>&#10022;</span>"
+        f"TROPHY CASE - {earned_count}/{len(badges)}"
+        f"<span class='sparkle'>&#10022;</span>"
+        f"</div>"
+        f"<div class='ach-grid edge-trophy-case'>{''.join(chips)}</div>"
         "</div>"
     )
 
@@ -2550,6 +2553,121 @@ st.markdown(
   font-size:.78rem; letter-spacing:.08em; text-transform:uppercase;
 }
 
+/* ---- Smoke / fog layer over splash (#2) ---- */
+#edge-splash::before, #edge-splash::after {
+  content: "";
+  position: absolute; inset: -20%;
+  pointer-events: none; z-index: 1;
+  background:
+    radial-gradient(closest-side at 25% 35%, rgba(220,38,38,.18), transparent 60%),
+    radial-gradient(closest-side at 70% 60%, rgba(255,255,255,.08), transparent 65%),
+    radial-gradient(closest-side at 50% 80%, rgba(220,38,38,.12), transparent 70%),
+    radial-gradient(closest-side at 80% 20%, rgba(255,255,255,.06), transparent 60%);
+  filter: blur(40px);
+  animation: edgeFog1 18s ease-in-out infinite alternate;
+  opacity: .9;
+}
+#edge-splash::after {
+  background:
+    radial-gradient(closest-side at 60% 25%, rgba(255,255,255,.06), transparent 55%),
+    radial-gradient(closest-side at 30% 70%, rgba(220,38,38,.10), transparent 60%),
+    radial-gradient(closest-side at 75% 75%, rgba(255,255,255,.05), transparent 60%);
+  animation: edgeFog2 24s ease-in-out infinite alternate;
+  filter: blur(55px);
+  opacity: .8;
+}
+#edge-splash > * { position: relative; z-index: 2; }
+@keyframes edgeFog1 {
+  0%   { transform: translate(-3%, -2%) scale(1);    }
+  50%  { transform: translate( 4%,  3%) scale(1.08); }
+  100% { transform: translate(-2%,  4%) scale(1.05); }
+}
+@keyframes edgeFog2 {
+  0%   { transform: translate( 2%,  3%) scale(1.05); }
+  50%  { transform: translate(-4%, -2%) scale(.97);  }
+  100% { transform: translate( 3%, -3%) scale(1.1);  }
+}
+
+/* ---- Stock ticker scrolling strip (#19) ---- */
+.edge-ticker {
+  background: linear-gradient(90deg, #000 0%, #0a0a0a 50%, #000 100%);
+  border-top: 1px solid rgba(220,38,38,.4);
+  border-bottom: 1px solid rgba(220,38,38,.4);
+  padding: 7px 0; overflow: hidden; position: relative;
+  font-family: "JetBrains Mono", "IBM Plex Mono", monospace;
+  font-size: .82rem; letter-spacing: .04em;
+  margin: -8px 0 14px;
+  box-shadow: 0 0 30px rgba(220,38,38,.18);
+}
+.edge-ticker::before, .edge-ticker::after {
+  content: ""; position: absolute; top: 0; bottom: 0; width: 60px;
+  z-index: 2; pointer-events: none;
+}
+.edge-ticker::before { left: 0;
+  background: linear-gradient(90deg, #000 30%, transparent); }
+.edge-ticker::after  { right: 0;
+  background: linear-gradient(270deg, #000 30%, transparent); }
+.edge-ticker-track {
+  display: inline-block; white-space: nowrap;
+  animation: edgeTick 80s linear infinite;
+  padding-left: 100%;
+}
+.edge-ticker-track:hover { animation-play-state: paused; }
+.edge-ticker-item { display: inline-block; padding: 0 28px; color: #D1D5DB; }
+.edge-ticker-item .lg  { color: #9CA3AF; font-weight: 700; margin-right: 6px; }
+.edge-ticker-item .pk  { color: #F3F4F6; }
+.edge-ticker-item .pr  { color: #10B981; font-weight: 700; margin-left: 8px; }
+.edge-ticker-item .eb  { color: #FBBF24; margin-left: 8px; }
+.edge-ticker-item .bk  { color: #6B7280; margin-left: 6px; font-size: .72rem; }
+.edge-ticker-item .sep { color: #DC2626; margin: 0 4px; }
+@keyframes edgeTick {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-100%); }
+}
+
+/* ---- Trophy case (#44) ---- */
+.edge-trophy-case {
+  background:
+    linear-gradient(180deg, rgba(245,158,11,.06), rgba(0,0,0,.4)) !important,
+    radial-gradient(ellipse at 50% -20%, rgba(245,158,11,.18), transparent 60%);
+  border: 1px solid rgba(245,158,11,.25) !important;
+  border-radius: 14px !important;
+  padding: 18px 16px !important;
+  box-shadow:
+    inset 0 0 40px rgba(245,158,11,.06),
+    0 0 30px rgba(245,158,11,.08);
+  position: relative;
+}
+.edge-trophy-case::before {
+  content: ""; position: absolute; left: 4%; right: 4%;
+  height: 3px; bottom: 28%;
+  background: linear-gradient(90deg,
+    transparent, rgba(245,158,11,.45), transparent);
+  box-shadow: 0 1px 6px rgba(245,158,11,.4);
+}
+.edge-trophy-case::after {
+  content: ""; position: absolute; left: 4%; right: 4%;
+  height: 3px; bottom: 4%;
+  background: linear-gradient(90deg,
+    transparent, rgba(245,158,11,.35), transparent);
+  box-shadow: 0 1px 6px rgba(245,158,11,.3);
+}
+.edge-trophy-head {
+  text-align: center;
+  font-family: "Bebas Neue", "Oswald", sans-serif;
+  letter-spacing: .25em; font-size: 1.05rem;
+  color: #F59E0B; margin-bottom: 12px;
+  text-shadow: 0 0 14px rgba(245,158,11,.45);
+}
+.edge-trophy-head .sparkle {
+  display: inline-block; margin: 0 8px;
+  animation: edgeSparkle 2.4s ease-in-out infinite;
+}
+@keyframes edgeSparkle {
+  0%, 100% { opacity: .35; transform: scale(.85); }
+  50%      { opacity: 1;   transform: scale(1.15); }
+}
+
 /* ---- Slot-machine shuffle on best-price flips (#3) ---- */
 b[style*="#10B981"] {
   animation: edgeShuffle 0.65s ease-out 1;
@@ -2930,6 +3048,108 @@ Bankroll tab. Params: <code>addBet</code>, <code>book</code>,
 </div>""",
             unsafe_allow_html=True,
         )
+    # ---- Game-day theme music (#85) ----
+    with st.expander("Game-day theme music", expanded=False):
+        st.caption(
+            "Ambient drone synthesized in your browser - no download, no "
+            "hosting, no copyright. Click play; tap stop anytime."
+        )
+        from streamlit.components.v1 import html as _components_html
+        _components_html(
+            """
+<style>
+  #edge-music-btn {
+    width: 100%; padding: 8px 10px; border-radius: 8px;
+    background: #0F0F0F; color: #F3F4F6;
+    border: 1px solid rgba(220,38,38,.4);
+    font-family: "Bebas Neue", "Oswald", sans-serif;
+    letter-spacing: .14em; font-size: .9rem;
+    cursor: pointer; transition: all .2s;
+  }
+  #edge-music-btn.on {
+    background: #DC2626; border-color: #DC2626;
+    box-shadow: 0 0 14px rgba(220,38,38,.45);
+  }
+  #edge-music-vol {
+    width: 100%; margin-top: 8px;
+  }
+</style>
+<button id="edge-music-btn">PLAY THEME</button>
+<input type="range" id="edge-music-vol"
+       min="0" max="100" value="35" />
+<script>
+(function(){
+  let actx, master, oscA, oscB, oscC, lfo, playing = false;
+  const btn = document.getElementById('edge-music-btn');
+  const vol = document.getElementById('edge-music-vol');
+  function start(){
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      actx = new AC();
+      master = actx.createGain();
+      master.gain.value = 0.0;
+      const lpf = actx.createBiquadFilter();
+      lpf.type = 'lowpass'; lpf.frequency.value = 700; lpf.Q.value = .8;
+      const reverb = actx.createDelay(); reverb.delayTime.value = 0.32;
+      const fb = actx.createGain(); fb.gain.value = 0.42;
+      reverb.connect(fb); fb.connect(reverb);
+      oscA = actx.createOscillator(); oscA.type='sine';
+      oscA.frequency.value = 110;
+      oscB = actx.createOscillator(); oscB.type='triangle';
+      oscB.frequency.value = 164.81;
+      oscC = actx.createOscillator(); oscC.type='sine';
+      oscC.frequency.value = 220;
+      const gA = actx.createGain(); gA.gain.value = .55;
+      const gB = actx.createGain(); gB.gain.value = .35;
+      const gC = actx.createGain(); gC.gain.value = .22;
+      lfo = actx.createOscillator(); lfo.frequency.value = 0.07;
+      const lfoG = actx.createGain(); lfoG.gain.value = 140;
+      lfo.connect(lfoG); lfoG.connect(lpf.frequency);
+      oscA.connect(gA); oscB.connect(gB); oscC.connect(gC);
+      gA.connect(lpf); gB.connect(lpf); gC.connect(lpf);
+      lpf.connect(reverb); reverb.connect(master);
+      lpf.connect(master);
+      master.connect(actx.destination);
+      oscA.start(); oscB.start(); oscC.start(); lfo.start();
+      const target = (parseInt(vol.value)||35) / 100 * 0.18;
+      master.gain.linearRampToValueAtTime(target, actx.currentTime + 2.5);
+      playing = true;
+    } catch(e){ console.error(e); }
+  }
+  function stop(){
+    try {
+      if (!actx) return;
+      master.gain.linearRampToValueAtTime(0, actx.currentTime + 1.2);
+      const a=actx;
+      setTimeout(function(){
+        try { oscA.stop(); oscB.stop(); oscC.stop(); lfo.stop(); a.close(); } catch(e){}
+        actx = null;
+      }, 1400);
+      playing = false;
+    } catch(e){}
+  }
+  btn.addEventListener('click', function(){
+    if (playing) {
+      stop();
+      btn.textContent = 'PLAY THEME';
+      btn.classList.remove('on');
+    } else {
+      start();
+      btn.textContent = 'STOP THEME';
+      btn.classList.add('on');
+    }
+  });
+  vol.addEventListener('input', function(){
+    if (master && actx) {
+      const target = (parseInt(vol.value)||0) / 100 * 0.18;
+      master.gain.linearRampToValueAtTime(target, actx.currentTime + 0.2);
+    }
+  });
+})();
+</script>
+            """,
+            height=110,
+        )
     st.markdown("---")
     st.markdown("### Bankroll")
     bankroll = st.number_input("Bankroll ($)", min_value=10.0, value=500.0, step=10.0)
@@ -3109,6 +3329,70 @@ for b in SPORTSBOOK_LINKS:
     )
 links_html += "</div>"
 st.markdown(links_html, unsafe_allow_html=True)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _ticker_picks():
+    rows = []
+    try:
+        rows = all_picks(
+            None, "team",
+            leagues_filter=("NBA", "NFL", "MLB", "NHL"),
+        )
+    except Exception:
+        return []
+    rows.sort(key=lambda r: r.get("edge_bps") or 0, reverse=True)
+    return rows[:12]
+
+
+# ---- Stock-ticker line-move strip (#19) ----
+try:
+    _tk = _ticker_picks()
+except Exception:
+    _tk = []
+_tk_items = []
+if _tk:
+    for r in _tk:
+        try:
+            _pk = (
+                f"{r.get('matchup','')} {r.get('market','')} "
+                f"{r.get('pick','')}"
+            )
+            _pr = format_american(int(r.get("price") or -110))
+            _eb = format_bps(r.get("edge_bps") or 0)
+            _bk = r.get("book", "")
+            _lg = r.get("league", "")
+            _tk_items.append(
+                f"<span class='edge-ticker-item'>"
+                f"<span class='lg'>{_lg}</span>"
+                f"<span class='pk'>{_pk}</span>"
+                f"<span class='pr'>{_pr}</span>"
+                f"<span class='eb'>{_eb}</span>"
+                f"<span class='bk'>{_bk}</span>"
+                f"<span class='sep'>|</span>"
+                f"</span>"
+            )
+        except Exception:
+            continue
+if not _tk_items:
+    for _msg in (
+        "EDGE LIVE", "SHARP MONEY", "BEST PRICE LOCKED",
+        "DRAFTKINGS / FANDUEL / BET365",
+        "PROPS GRADED AUTOMATICALLY",
+        "ASK EDGE - YOUR AI BETTING DESK",
+    ):
+        _tk_items.append(
+            f"<span class='edge-ticker-item'>"
+            f"<span class='pk'>{_msg}</span>"
+            f"<span class='sep'>|</span></span>"
+        )
+_track_html = "".join(_tk_items * 2)
+st.markdown(
+    f"<div class='edge-ticker'>"
+    f"<div class='edge-ticker-track'>{_track_html}</div>"
+    f"</div>",
+    unsafe_allow_html=True,
+)
 
 (
     tab_picks, tab_props, tab_pp_board, tab_parlay,
@@ -4301,6 +4585,82 @@ with tab_bank:
         unsafe_allow_html=True,
     )
 
+    # ---- Daily P&L waterfall (#25) ----
+    with st.expander("Daily P&L waterfall (last 21 days)", expanded=True):
+        try:
+            import plotly.graph_objects as _go
+            _daily = {}
+            for _b in settled:
+                _d = (_b.get("settled_at") or _b.get("date") or "")[:10]
+                if not _d:
+                    continue
+                if _b["status"] == "won":
+                    _delta = float(_b.get("to_win") or 0)
+                elif _b["status"] == "lost":
+                    _delta = -float(_b.get("stake") or 0)
+                else:
+                    _delta = 0.0
+                _daily[_d] = _daily.get(_d, 0.0) + _delta
+            if not _daily:
+                st.caption("Settle some bets to see your daily P&L break out.")
+            else:
+                _days = sorted(_daily.keys())[-21:]
+                _vals = [_daily[d] for d in _days]
+                _running = 0.0
+                _hover = []
+                for v in _vals:
+                    _running += v
+                    _hover.append(
+                        f"Day P&L: ${v:+.2f}<br>Running: ${_running:+.2f}"
+                    )
+                _fig = _go.Figure(_go.Waterfall(
+                    x=_days, y=_vals,
+                    measure=["relative"] * len(_vals),
+                    text=[f"${v:+.0f}" for v in _vals],
+                    textposition="outside",
+                    hovertext=_hover, hoverinfo="text+x",
+                    increasing={"marker": {"color": "#10B981"}},
+                    decreasing={"marker": {"color": "#DC2626"}},
+                    totals={"marker": {"color": "#F59E0B"}},
+                    connector={"line": {
+                        "color": "rgba(255,255,255,.18)", "width": 1,
+                    }},
+                ))
+                _fig.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#F3F4F6", family="Inter, system-ui"),
+                    height=380,
+                    margin=dict(l=10, r=10, t=20, b=40),
+                    xaxis=dict(
+                        gridcolor="rgba(255,255,255,.04)",
+                        tickfont=dict(size=10, color="#9CA3AF"),
+                    ),
+                    yaxis=dict(
+                        gridcolor="rgba(255,255,255,.06)",
+                        tickfont=dict(size=11, color="#9CA3AF"),
+                        zerolinecolor="rgba(220,38,38,.4)", zerolinewidth=1,
+                        tickprefix="$",
+                    ),
+                    showlegend=False,
+                )
+                st.plotly_chart(
+                    _fig, use_container_width=True,
+                    config={"displayModeBar": False},
+                )
+                st.caption(
+                    f"Cumulative over window: "
+                    f"${sum(_vals):+,.2f} across {len(_days)} days. "
+                    "Green bars = winning days, red = losing days."
+                )
+        except ImportError:
+            st.caption(
+                "Add `plotly>=5.18` to requirements.txt to render the "
+                "waterfall chart."
+            )
+        except Exception as _e:
+            st.caption(f"Waterfall unavailable: {_e}")
+
     with st.expander("Bankroll forecaster (Monte-Carlo, 60 days)"):
         forecast_days = st.slider(
             "Days to project", 14, 120, 60, 7, key="forecast_days",
@@ -5067,6 +5427,136 @@ try:
 </div>
 </div>""",
         unsafe_allow_html=True,
+    )
+except Exception:
+    pass
+
+# ---- Always-on backlight (Wake Lock) + first-run tour (#41) ----
+try:
+    from streamlit.components.v1 import html as _wake_html
+    _wake_html(
+        """
+<script>
+(async function(){
+  // ---- Wake Lock: keep the screen on while EDGE is open ----
+  let wl = null;
+  async function acquire(){
+    try {
+      if ('wakeLock' in navigator) {
+        wl = await navigator.wakeLock.request('screen');
+        wl.addEventListener('release', () => {});
+      }
+    } catch(e){}
+  }
+  acquire();
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') acquire();
+  });
+
+  // ---- First-run guided tour ----
+  let pdoc;
+  try { pdoc = window.parent.document; } catch(e) { pdoc = document; }
+  let seen = false;
+  try { seen = !!localStorage.getItem('edge_tour_seen_v1'); } catch(e){}
+  if (seen) return;
+  if (pdoc.getElementById('edge-tour-ov')) return;
+
+  const steps = [
+    {t:'Welcome to EDGE',
+     b:'Sharp. Fast. Ruthless. 60-second tour - then you are off.'},
+    {t:'1) The Board',
+     b:'Live odds across DraftKings, FanDuel, Bet365. Best price highlighted in green. Open Alt-lines to shop spreads & totals.'},
+    {t:'2) Suggested Picks',
+     b:'Highest-edge picks with auto-sized stakes ($1-$10). Tap "Lock it in" to log instantly.'},
+    {t:'3) Player Props',
+     b:'PrizePicks-style player props with edge math. Build a same-game parlay at the bottom of the tab.'},
+    {t:'4) Bankroll',
+     b:'Auto-graded settles, ROI, streaks, equity curve, daily P&L waterfall, trophy case, leaderboard.'},
+    {t:'5) Ask Edge',
+     b:'AI sidekick: voice mode, "why this pick", post-bet critiques. Have fun.'},
+  ];
+  let i = 0;
+
+  const ov = pdoc.createElement('div');
+  ov.id = 'edge-tour-ov';
+  ov.style.cssText =
+    'position:fixed;inset:0;background:rgba(0,0,0,.82);' +
+    'z-index:99999;display:flex;align-items:center;justify-content:center;' +
+    'backdrop-filter:blur(12px);' +
+    'font-family:Inter,system-ui,sans-serif;';
+
+  const card = pdoc.createElement('div');
+  card.style.cssText =
+    'max-width:460px;width:90%;padding:30px 28px;border-radius:16px;' +
+    'background:linear-gradient(180deg,#0F0F0F,#000);' +
+    'border:1px solid rgba(220,38,38,.5);' +
+    'box-shadow:0 0 60px rgba(220,38,38,.35);' +
+    'color:#F3F4F6;position:relative;';
+
+  const t = pdoc.createElement('div');
+  t.style.cssText =
+    'font-family:"Bebas Neue","Oswald",sans-serif;' +
+    'font-size:1.7rem;letter-spacing:.14em;color:#DC2626;' +
+    'margin-bottom:10px;text-shadow:0 0 18px rgba(220,38,38,.4);';
+
+  const b = pdoc.createElement('div');
+  b.style.cssText =
+    'font-size:.96rem;line-height:1.55;color:#D1D5DB;' +
+    'margin-bottom:22px;min-height:80px;';
+
+  const dots = pdoc.createElement('div');
+  dots.style.cssText =
+    'display:flex;gap:7px;justify-content:center;margin-bottom:20px;';
+
+  const ctrl = pdoc.createElement('div');
+  ctrl.style.cssText = 'display:flex;gap:10px;justify-content:flex-end;';
+
+  const skip = pdoc.createElement('button');
+  skip.textContent = 'Skip';
+  skip.style.cssText =
+    'background:transparent;color:#9CA3AF;border:1px solid #374151;' +
+    'padding:9px 20px;border-radius:8px;cursor:pointer;' +
+    'font-family:inherit;font-size:.85rem;letter-spacing:.06em;';
+
+  const next = pdoc.createElement('button');
+  next.style.cssText =
+    'background:#DC2626;color:#fff;border:0;padding:9px 24px;' +
+    'border-radius:8px;cursor:pointer;font-weight:700;' +
+    'letter-spacing:.08em;font-family:inherit;font-size:.85rem;' +
+    'box-shadow:0 0 16px rgba(220,38,38,.4);';
+
+  function render(){
+    t.textContent = steps[i].t;
+    b.textContent = steps[i].b;
+    next.textContent = (i === steps.length - 1) ? "LET'S GO" : 'NEXT';
+    dots.innerHTML = '';
+    steps.forEach(function(_, k){
+      const d = pdoc.createElement('span');
+      d.style.cssText =
+        'width:9px;height:9px;border-radius:50%;background:' +
+        (k === i ? '#DC2626' : '#374151') + ';' +
+        'transition:all .25s;' +
+        (k === i ? 'box-shadow:0 0 8px rgba(220,38,38,.6);' : '');
+      dots.appendChild(d);
+    });
+  }
+  function dismiss(){
+    try { localStorage.setItem('edge_tour_seen_v1','1'); } catch(e){}
+    ov.remove();
+  }
+  next.addEventListener('click', function(){
+    if (i < steps.length - 1) { i++; render(); } else { dismiss(); }
+  });
+  skip.addEventListener('click', dismiss);
+
+  card.appendChild(t); card.appendChild(b); card.appendChild(dots);
+  ctrl.appendChild(skip); ctrl.appendChild(next); card.appendChild(ctrl);
+  ov.appendChild(card); pdoc.body.appendChild(ov);
+  render();
+})();
+</script>
+        """,
+        height=0,
     )
 except Exception:
     pass
