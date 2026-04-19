@@ -764,104 +764,106 @@ def build_explain_bet_markdown(row, compare_df=None):
 # -----------------------------
 # LIVE FETCH
 # -----------------------------
-@st.cache_data(ttl=900, show_spinner="Loading live odds...")
-def fetch_events(leagues):
-    api_key = st.secrets.get("SPORTS_GAME_ODDS_API_KEY", "")
-    if not api_key:
-        return [], "Missing SPORTS_GAME_ODDS_API_KEY in Streamlit secrets."
+# -----------------------------
+# LIVE FETCH
+# -----------------------------
+def _get_cached_events_fallback(cache_key):
+    if "last_good_events" not in st.session_state:
+        st.session_state["last_good_events"] = {}
+    return st.session_state["last_good_events"].get(cache_key, [])
 
+
+def _set_cached_events_fallback(cache_key, events):
+    if "last_good_events" not in st.session_state:
+        st.session_state["last_good_events"] = {}
+    st.session_state["last_good_events"][cache_key] = events
+
+
+def _fetch_events_for_single_league(api_key, league):
     url = "https://api.sportsgameodds.com/v2/events/"
     headers = {"x-api-key": api_key}
     params = {
-        "leagueID": ",".join(leagues),
+        "leagueID": league,
         "oddsAvailable": "true",
-        "limit": 100,
+        "limit": 35,
     }
 
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=25)
-        response.raise_for_status()
-        payload = response.json()
-        events = payload.get("data", []) if isinstance(payload, dict) else payload
-        return events, ""
-    except Exception as exc:
-        return [], f"API error: {exc}"
+    backoff_seconds = [1, 2, 4]
 
+    for attempt, wait_time in enumerate(backoff_seconds, start=1):
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=25)
 
-def flatten_events_to_rows(events):
-    rows = []
-
-    for event in events:
-        event_id = event.get("eventID", "")
-        league_id = event.get("leagueID", "")
-        sport_id = event.get("sportID", "")
-        status = event.get("status", {}) or {}
-        teams = event.get("teams", {}) or {}
-        players = event.get("players", {}) or {}
-        event_links = (event.get("links", {}) or {}).get("bookmakers", {}) or {}
-        odds_map = event.get("odds", {}) or {}
-
-        home_name = safe_team_name(teams.get("home", {}), "Home")
-        away_name = safe_team_name(teams.get("away", {}), "Away")
-        event_name = f"{away_name} @ {home_name}"
-        starts_at = status.get("startsAt", "")
-
-        for odd_id, odd in odds_map.items():
-            by_bookmaker = odd.get("byBookmaker", {}) or {}
-            market_name = odd.get("marketName", "") or "Market"
-
-            for book_id, quote in by_bookmaker.items():
-                if book_id not in TARGET_BOOKS:
+            if response.status_code == 429:
+                if attempt < len(backoff_seconds):
+                    time.sleep(wait_time)
                     continue
-                if not isinstance(quote, dict):
-                    continue
-                if quote.get("available") is False:
-                    continue
+                return [], f"Rate limit reached for {league}. The API returned 429 Too Many Requests."
 
-                odds_value = quote.get("odds")
-                implied_prob = american_to_implied(odds_value)
-                if implied_prob is None:
-                    continue
+            if response.status_code in (401, 403):
+                return [], "SportsGameOdds API key is missing, invalid, or does not have access to this endpoint."
 
-                pick_label = build_pick_label(
-                    odd=odd,
-                    quote=quote,
-                    home_name=home_name,
-                    away_name=away_name,
-                    players=players,
-                )
+            response.raise_for_status()
+            payload = response.json()
+            events = payload.get("data", []) if isinstance(payload, dict) else payload
+            return events, ""
 
-                deep_link = quote.get("deeplink") or event_links.get(book_id, "")
-                sportsbook_name = TARGET_BOOKS[book_id]
-                market_bucket = classify_market(market_name, pick_label, sportsbook_name)
-                row_key = f"{event_id}|{odd_id}|{book_id}"
+        except requests.exceptions.Timeout:
+            if attempt < len(backoff_seconds):
+                time.sleep(wait_time)
+                continue
+            return [], f"Timed out while loading {league} odds."
+        except requests.exceptions.RequestException as exc:
+            return [], f"API request failed for {league}: {exc}"
+        except Exception as exc:
+            return [], f"Unexpected error while loading {league}: {exc}"
 
-                rows.append(
-                    {
-                        "Row Key": row_key,
-                        "Event ID": event_id,
-                        "Odd ID": odd_id,
-                        "Sport": league_id or sport_id,
-                        "Event": event_name,
-                        "Home Team": home_name,
-                        "Away Team": away_name,
-                        "Start Time": starts_at,
-                        "Minutes To Start": minutes_to_start(starts_at),
-                        "Market": market_name,
-                        "Market Bucket": market_bucket,
-                        "Pick": pick_label,
-                        "Sportsbook": sportsbook_name,
-                        "Sportsbook ID": book_id,
-                        "Odds": str(odds_value),
-                        "Implied Prob": implied_prob,
-                        "Line": quote.get("spread") or quote.get("overUnder") or "",
-                        "Last Update": quote.get("lastUpdatedAt", ""),
-                        "Link": deep_link,
-                    }
-                )
+    return [], f"Could not load {league} after multiple attempts."
 
-    return pd.DataFrame(rows)
 
+@st.cache_data(ttl=1800, show_spinner="Loading live odds...")
+def fetch_events(leagues):
+    api_key = st.secrets.get("SPORTS_GAME_ODDS_API_KEY", "")
+    if not api_key:
+        return [], "Missing SPORTS_GAME_ODDS_API_KEY in Streamlit secrets.", False
+
+    selected_leagues = list(leagues or [])
+    if not selected_leagues:
+        return [], "Please select at least one league.", False
+
+    cache_key = "|".join(sorted(selected_leagues))
+    all_events = []
+    messages = []
+    had_429 = False
+
+    for league in selected_leagues:
+        league_events, league_error = _fetch_events_for_single_league(api_key, league)
+
+        if league_error:
+            messages.append(league_error)
+            if "429" in league_error or "Rate limit" in league_error:
+                had_429 = True
+            continue
+
+        all_events.extend(league_events)
+        time.sleep(0.35)
+
+    if all_events:
+        _set_cached_events_fallback(cache_key, all_events)
+        if messages:
+            return all_events, "Loaded with partial warnings: " + " | ".join(messages), False
+        return all_events, "", False
+
+    fallback_events = _get_cached_events_fallback(cache_key)
+    if fallback_events:
+        if had_429:
+            return fallback_events, "SportsGameOdds rate limit hit. Showing last successful cached board.", True
+        return fallback_events, "Live API failed. Showing last successful cached board.", True
+
+    if had_429:
+        return [], "SportsGameOdds rate limit hit. Wait a few minutes, then click Refresh now.", False
+
+    return [], " | ".join(messages) if messages else "No live odds could be loaded.", False
 
 # -----------------------------
 # SCORING
