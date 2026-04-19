@@ -1,5 +1,8 @@
-import requests
+import math
+from datetime import datetime, timezone
+
 import pandas as pd
+import requests
 import streamlit as st
 
 st.set_page_config(
@@ -19,8 +22,10 @@ TARGET_BOOKS = {
 DEFAULT_LEAGUES = ["NBA", "NFL", "MLB", "NHL"]
 
 
+# -----------------------------
+# BASIC HELPERS
+# -----------------------------
 def american_to_implied(odds_value):
-    """Convert American odds string like +120 / -110 to implied probability %."""
     try:
         odds_str = str(odds_value).strip().replace("−", "-")
         odds = int(odds_str)
@@ -51,6 +56,46 @@ def safe_player_name(players, stat_entity_id):
     return player.get("name") or str(stat_entity_id).replace("_", " ").title()
 
 
+def parse_iso_datetime(value):
+    if not value:
+        return None
+    try:
+        txt = str(value).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(txt)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def minutes_to_start(value):
+    dt = parse_iso_datetime(value)
+    if dt is None:
+        return None
+    now_utc = datetime.now(timezone.utc)
+    return round((dt - now_utc).total_seconds() / 60, 1)
+
+
+def classify_market(market_name, pick, sportsbook):
+    text = f"{market_name} {pick}".lower()
+
+    if sportsbook == "PrizePicks":
+        return "DFS Prop"
+
+    if "moneyline" in text or text.strip() in {"ml", "winner"}:
+        return "Moneyline"
+    if "spread" in text or "run line" in text or "puck line" in text or "handicap" in text:
+        return "Spread"
+    if "total" in text or "over " in text or "under " in text:
+        return "Total"
+    if "player" in text or "points" in text or "rebounds" in text or "assists" in text:
+        return "Player Prop"
+    if "team total" in text:
+        return "Team Total"
+    return "Other"
+
+
 def build_pick_label(odd, quote, home_name, away_name, players):
     side_id = str(odd.get("sideID", "") or "")
     stat_entity_id = str(odd.get("statEntityID", "") or "")
@@ -58,7 +103,6 @@ def build_pick_label(odd, quote, home_name, away_name, players):
 
     simple_entities = {"all", "home", "away", "draw", "home+draw", "away+draw"}
 
-    # Totals / props with lines
     if quote.get("overUnder") is not None:
         line = quote.get("overUnder")
         if stat_entity_id not in simple_entities:
@@ -66,7 +110,6 @@ def build_pick_label(odd, quote, home_name, away_name, players):
             return f"{player_name} {side_id.title()} {line}"
         return f"{side_id.title()} {line}"
 
-    # Spreads / handicaps
     if quote.get("spread") is not None:
         line = quote.get("spread")
         if stat_entity_id == "home" or side_id == "home":
@@ -77,7 +120,6 @@ def build_pick_label(odd, quote, home_name, away_name, players):
             target = stat_entity_id.replace("_", " ").title()
         return f"{target} {line}"
 
-    # Standard team-side markets
     if stat_entity_id == "home" or side_id == "home":
         return home_name
     if stat_entity_id == "away" or side_id == "away":
@@ -89,7 +131,6 @@ def build_pick_label(odd, quote, home_name, away_name, players):
     if side_id == "away+draw":
         return f"{away_name} or Draw"
 
-    # Player yes/no props
     if stat_entity_id not in simple_entities:
         player_name = safe_player_name(players, stat_entity_id)
         if side_id in {"yes", "no"}:
@@ -102,9 +143,17 @@ def build_pick_label(odd, quote, home_name, away_name, players):
     return market_name
 
 
+def make_link_markdown(url):
+    if not url:
+        return ""
+    return f"[Open]({url})"
+
+
+# -----------------------------
+# LIVE ODDS FETCH
+# -----------------------------
 @st.cache_data(ttl=900, show_spinner="Loading live odds...")
 def fetch_events(leagues):
-    """Fetch live/upcoming events with odds from SportsGameOdds."""
     api_key = st.secrets.get("SPORTS_GAME_ODDS_API_KEY", "")
     if not api_key:
         return [], "Missing SPORTS_GAME_ODDS_API_KEY in Streamlit secrets."
@@ -171,6 +220,8 @@ def flatten_events_to_rows(events):
                 )
 
                 deep_link = quote.get("deeplink") or event_links.get(book_id, "")
+                sportsbook_name = TARGET_BOOKS[book_id]
+                market_bucket = classify_market(market_name, pick_label, sportsbook_name)
 
                 rows.append(
                     {
@@ -179,9 +230,11 @@ def flatten_events_to_rows(events):
                         "Sport": league_id or sport_id,
                         "Event": event_name,
                         "Start Time": starts_at,
+                        "Minutes To Start": minutes_to_start(starts_at),
                         "Market": market_name,
+                        "Market Bucket": market_bucket,
                         "Pick": pick_label,
-                        "Sportsbook": TARGET_BOOKS[book_id],
+                        "Sportsbook": sportsbook_name,
                         "Sportsbook ID": book_id,
                         "Odds": str(odds_value),
                         "Implied Prob": implied_prob,
@@ -194,90 +247,153 @@ def flatten_events_to_rows(events):
     return pd.DataFrame(rows)
 
 
-def apply_provisional_scoring(df, min_bet, max_bet):
-    """
-    Provisional scoring only:
-    compares each book's price to the average implied probability for the same odd.
-    Lower implied probability = better price for the bettor.
-    """
+# -----------------------------
+# SMARTER SCORING ENGINE
+# -----------------------------
+def confidence_from_score(score):
+    if score >= 7.0:
+        return "Elite"
+    if score >= 5.0:
+        return "High"
+    if score >= 3.0:
+        return "Medium"
+    return "Low"
+
+
+def market_weight(bucket):
+    weights = {
+        "Moneyline": 1.25,
+        "Spread": 1.20,
+        "Total": 1.10,
+        "Team Total": 0.85,
+        "Player Prop": 0.55,
+        "DFS Prop": 0.35,
+        "Other": 0.40,
+    }
+    return weights.get(bucket, 0.40)
+
+
+def time_penalty(minutes):
+    if minutes is None:
+        return 0.0
+    if minutes < 0:
+        return -2.0
+    if minutes < 15:
+        return -1.3
+    if minutes < 60:
+        return -0.8
+    if minutes < 180:
+        return -0.3
+    return 0.0
+
+
+def book_penalty(book_name):
+    if book_name == "PrizePicks":
+        return -0.6
+    return 0.0
+
+
+def bet_size_from_score(edge, score, min_bet, max_bet):
+    if edge < 1.0 or score < 3.0:
+        return 0
+
+    if score < 4.0:
+        return int(min_bet)
+    if score < 5.0:
+        return int(min(max_bet, max(min_bet, 3)))
+    if score < 6.0:
+        return int(min(max_bet, max(min_bet, 5)))
+    if score < 7.0:
+        return int(min(max_bet, max(min_bet, 7)))
+    return int(min(max_bet, max(min_bet, 10)))
+
+
+def build_reason(row):
+    parts = []
+
+    if row["Is Best Price"]:
+        parts.append(f"best current price across {int(row['Books Quoting'])} books")
+    else:
+        parts.append(f"positive price edge vs {int(row['Books Quoting'])} book consensus")
+
+    bucket = row["Market Bucket"]
+    if bucket in {"Moneyline", "Spread", "Total"}:
+        parts.append(f"{bucket.lower()} market carries stronger confidence")
+    elif bucket in {"Player Prop", "DFS Prop"}:
+        parts.append("prop market keeps stake more conservative")
+
+    mins = row["Minutes To Start"]
+    if mins is not None:
+        if mins >= 180:
+            parts.append("not too close to lock")
+        elif mins >= 60:
+            parts.append("moderate time before start")
+        else:
+            parts.append("close to start, so confidence is reduced")
+
+    if row["Sportsbook"] == "PrizePicks":
+        parts.append("PrizePicks lines are treated more cautiously")
+
+    return " • ".join(parts)
+
+
+def apply_smart_scoring(df, min_bet, max_bet):
     if df.empty:
-        df["Model Prob"] = []
-        df["Edge %"] = []
-        df["Confidence"] = []
-        df["Recommended Bet"] = []
-        df["Status"] = []
         return df
 
-    market_consensus = (
+    market_stats = (
         df.groupby(["Event ID", "Odd ID"])["Implied Prob"]
-        .agg(["mean", "count"])
+        .agg(["mean", "min", "max", "count", "std"])
         .reset_index()
-        .rename(columns={"mean": "Consensus Prob", "count": "Books Quoting"})
+        .rename(
+            columns={
+                "mean": "Consensus Prob",
+                "min": "Best Price Prob",
+                "max": "Worst Price Prob",
+                "count": "Books Quoting",
+                "std": "Prob StdDev",
+            }
+        )
     )
 
-    scored = df.merge(market_consensus, on=["Event ID", "Odd ID"], how="left")
+    scored = df.merge(market_stats, on=["Event ID", "Odd ID"], how="left")
+    scored["Prob StdDev"] = scored["Prob StdDev"].fillna(0.0)
     scored["Model Prob"] = scored["Consensus Prob"].round(2)
+
+    # Lower implied probability is better for the bettor.
     scored["Edge %"] = (scored["Consensus Prob"] - scored["Implied Prob"]).round(2)
+    scored["Best Line Gap %"] = (scored["Worst Price Prob"] - scored["Implied Prob"]).round(2)
+    scored["Is Best Price"] = scored["Implied Prob"] <= (scored["Best Price Prob"] + 0.0001)
 
-    def confidence_label(row):
-        edge = row["Edge %"]
-        books = row["Books Quoting"]
-        if books >= 3 and edge >= 3:
-            return "High"
-        if books >= 2 and edge >= 1.5:
-            return "Medium"
-        return "Low"
+    scored["Market Weight"] = scored["Market Bucket"].apply(market_weight)
+    scored["Time Penalty"] = scored["Minutes To Start"].apply(time_penalty)
+    scored["Book Penalty"] = scored["Sportsbook"].apply(book_penalty)
+    scored["Books Bonus"] = scored["Books Quoting"].apply(lambda x: min((x - 1) * 0.55, 2.20))
 
-    def bet_size(row):
-        edge = row["Edge %"]
-        books = row["Books Quoting"]
-        if books < 2 or edge < 1.5:
-            return 0
-        if edge < 3:
-            return int(min_bet)
-        if edge < 5:
-            return int(min(max_bet, min_bet + 1))
-        return int(min(max_bet, min_bet + 2))
+    scored["Bet Score"] = (
+        scored["Edge %"] * 0.95
+        + scored["Best Line Gap %"] * 0.35
+        + scored["Books Bonus"]
+        + scored["Market Weight"]
+        + scored["Time Penalty"]
+        + scored["Book Penalty"]
+    ).round(2)
 
-    scored["Confidence"] = scored.apply(confidence_label, axis=1)
-    scored["Recommended Bet"] = scored.apply(bet_size, axis=1)
-    scored["Status"] = scored["Recommended Bet"].apply(
-        lambda x: "Value Look" if x > 0 else "Watch"
+    scored["Confidence"] = scored["Bet Score"].apply(confidence_from_score)
+    scored["Recommended Bet"] = scored.apply(
+        lambda row: bet_size_from_score(
+            edge=row["Edge %"],
+            score=row["Bet Score"],
+            min_bet=min_bet,
+            max_bet=max_bet,
+        ),
+        axis=1,
     )
+    scored["Status"] = scored["Recommended Bet"].apply(lambda x: "Bet" if x > 0 else "No Bet")
+    scored["Reason"] = scored.apply(build_reason, axis=1)
 
     return scored
 
-
-def make_link_markdown(url):
-    if not url:
-        return ""
-    return f"[Open]({url})"
-
-
-# -----------------------------
-# SIDEBAR
-# -----------------------------
-st.sidebar.title("⚙️ Dashboard Controls")
-
-bankroll = st.sidebar.number_input("Bankroll", min_value=1.0, value=500.0, step=25.0)
-min_bet = st.sidebar.number_input("Minimum Bet", min_value=1.0, value=1.0, step=1.0)
-max_bet = st.sidebar.number_input("Maximum Bet", min_value=1.0, value=10.0, step=1.0)
-
-league_filter = st.sidebar.multiselect(
-    "Leagues",
-    options=DEFAULT_LEAGUES,
-    default=DEFAULT_LEAGUES,
-)
-
-book_filter = st.sidebar.multiselect(
-    "Sportsbooks",
-    options=["DraftKings", "FanDuel", "Bet365", "PrizePicks"],
-    default=["DraftKings", "FanDuel", "Bet365", "PrizePicks"],
-)
-
-if st.sidebar.button("Refresh now"):
-    st.cache_data.clear()
-    st.rerun()
 
 # -----------------------------
 # STYLING
@@ -361,321 +477,355 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
 # -----------------------------
-# LOAD DATA
+# SIDEBAR
 # -----------------------------
-events, error_message = fetch_events(league_filter)
+st.sidebar.title("⚙️ Dashboard Controls")
+
+bankroll = st.sidebar.number_input("Bankroll", min_value=1.0, value=500.0, step=25.0)
+min_bet = st.sidebar.number_input("Minimum Bet", min_value=1.0, value=1.0, step=1.0)
+max_bet = st.sidebar.number_input("Maximum Bet", min_value=1.0, value=10.0, step=1.0)
+
+league_filter = st.sidebar.multiselect(
+    "Leagues",
+    options=DEFAULT_LEAGUES,
+    default=DEFAULT_LEAGUES,
+)
+
+book_filter = st.sidebar.multiselect(
+    "Sportsbooks",
+    options=["DraftKings", "FanDuel", "Bet365", "PrizePicks"],
+    default=["DraftKings", "FanDuel", "Bet365", "PrizePicks"],
+)
+
+only_bets = st.sidebar.toggle("Show recommended bets only", value=False)
+
+if st.sidebar.button("Refresh now"):
+    st.cache_data.clear()
+    st.rerun()
+
 
 st.markdown('<div class="main-title">🏈 Sports Betting Dashboard</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="sub-title">Live odds board, line shopping, and provisional value looks.</div>',
+    '<div class="sub-title">Auto-refreshing odds board with smarter bet scoring and stake sizing.</div>',
     unsafe_allow_html=True,
 )
 
-if error_message:
-    st.warning(error_message)
-    st.info("Add your API key in Streamlit app settings → Secrets, then click Refresh now.")
-    st.stop()
-
-raw_df = flatten_events_to_rows(events)
-
-if raw_df.empty:
-    st.warning("No live odds came back for the leagues selected.")
-    st.stop()
-
-scored_df = apply_provisional_scoring(raw_df, min_bet=min_bet, max_bet=max_bet)
-filtered_df = scored_df[scored_df["Sportsbook"].isin(book_filter)].copy()
-
-live_value_df = filtered_df[filtered_df["Status"] == "Value Look"].copy()
-live_value_df = live_value_df.sort_values(["Edge %", "Books Quoting"], ascending=[False, False])
-
-best_row = live_value_df.iloc[0] if not live_value_df.empty else None
-best_edge = float(live_value_df["Edge %"].max()) if not live_value_df.empty else 0.0
-avg_edge = float(live_value_df["Edge %"].mean()) if not live_value_df.empty else 0.0
-open_risk = int(live_value_df["Recommended Bet"].sum()) if not live_value_df.empty else 0
-active_bets = int(len(live_value_df))
 
 # -----------------------------
-# HEADER / HERO
+# LIVE DASHBOARD FRAGMENT
 # -----------------------------
-st.markdown('<div class="hero-box">', unsafe_allow_html=True)
-hero_left, hero_right = st.columns([2, 1])
+@st.fragment(run_every="15m")
+def render_live_dashboard():
+    events, error_message = fetch_events(league_filter)
 
-with hero_left:
-    st.markdown("### Current Top Value Look")
-    if best_row is not None:
-        st.markdown(
-            f"""
-            **{best_row['Pick']}**  
-            {best_row['Event']} · {best_row['Market']}  
-            Book: **{best_row['Sportsbook']}** · Odds: **{best_row['Odds']}**  
-            Price Edge: **{best_row['Edge %']:.2f}%** · Confidence: **{best_row['Confidence']}**  
-            Provisional Stake: **${best_row['Recommended Bet']}**
-            """
-        )
-        if best_row["Link"]:
-            st.markdown(f"[Open bet page]({best_row['Link']})")
-    else:
-        st.info("No provisional value looks right now. The board is still live below.")
-
-with hero_right:
-    st.markdown('<div class="small-label">Current Bankroll</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="big-value">${bankroll:,.2f}</div>', unsafe_allow_html=True)
-    st.markdown('<div class="small-label">Bet Range</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="big-value">${min_bet:.0f} - ${max_bet:.0f}</div>', unsafe_allow_html=True)
-    st.markdown('<div class="small-label">Events Loaded</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="big-value">{len(events)}</div>', unsafe_allow_html=True)
-
-st.markdown("</div>", unsafe_allow_html=True)
-
-# -----------------------------
-# KPI ROW
-# -----------------------------
-k1, k2, k3, k4 = st.columns(4)
-with k1:
-    st.metric("Value Looks", active_bets)
-with k2:
-    st.metric("Best Edge", f"{best_edge:.2f}%")
-with k3:
-    st.metric("Average Edge", f"{avg_edge:.2f}%")
-with k4:
-    st.metric("Open Risk", f"${open_risk}")
-
-st.info(
-    "Current recommendations are provisional. This step is line-shopping only: it flags books posting a better price than the average of the selected books for the same exact outcome."
-)
-
-# -----------------------------
-# TABS
-# -----------------------------
-tabs = st.tabs(
-    [
-        "Home",
-        "Best Bets",
-        "DraftKings",
-        "FanDuel",
-        "Bet365",
-        "PrizePicks",
-        "Bankroll",
-    ]
-)
-
-# -----------------------------
-# HOME TAB
-# -----------------------------
-with tabs[0]:
-    left, right = st.columns([1.4, 1])
-
-    with left:
-        st.markdown('<div class="section-title">Top Value Looks</div>', unsafe_allow_html=True)
-        top_df = live_value_df.head(5)
-
-        if top_df.empty:
-            st.warning("No value looks available at this moment.")
-        else:
-            for _, row in top_df.iterrows():
-                link_html = f'<br><a href="{row["Link"]}" target="_blank">Open bet page</a>' if row["Link"] else ""
-                st.markdown(
-                    f"""
-                    <div class="best-bet">
-                        <b>{row['Pick']}</b><br>
-                        {row['Event']} · {row['Market']}<br>
-                        Book: <b>{row['Sportsbook']}</b> · Odds: <b>{row['Odds']}</b><br>
-                        Edge: <b>{row['Edge %']:.2f}%</b> · Confidence: <b>{row['Confidence']}</b><br>
-                        Suggested Stake: <b>${row['Recommended Bet']}</b>
-                        {link_html}
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-    with right:
-        st.markdown('<div class="section-title">What this step does</div>', unsafe_allow_html=True)
-        st.markdown(
-            """
-            <div class="card">
-            • Pulls live odds from SportsGameOdds<br>
-            • Filters to DraftKings, FanDuel, Bet365, and PrizePicks<br>
-            • Compares the same exact market across books<br>
-            • Flags books showing the best current price<br>
-            • Keeps data fresh with a 15-minute cache
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-# -----------------------------
-# BEST BETS TAB
-# -----------------------------
-with tabs[1]:
-    st.markdown('<div class="section-title">Live Best Bets Board</div>', unsafe_allow_html=True)
-
-    display_df = filtered_df.copy()
-    display_df["Link"] = display_df["Link"].apply(make_link_markdown)
-    display_df = display_df[
-        [
-            "Sport",
-            "Event",
-            "Market",
-            "Pick",
-            "Sportsbook",
-            "Odds",
-            "Implied Prob",
-            "Model Prob",
-            "Edge %",
-            "Confidence",
-            "Recommended Bet",
-            "Status",
-            "Link",
-        ]
-    ].sort_values(["Status", "Edge %"], ascending=[False, False])
-
-    st.dataframe(
-        display_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Implied Prob": st.column_config.NumberColumn(format="%.2f%%"),
-            "Model Prob": st.column_config.NumberColumn(format="%.2f%%"),
-            "Edge %": st.column_config.NumberColumn(format="%.2f%%"),
-            "Recommended Bet": st.column_config.NumberColumn(format="$%d"),
-            "Link": st.column_config.LinkColumn("Open"),
-        },
-    )
-
-# -----------------------------
-# SPORTSBOOK TABS
-# -----------------------------
-def sportsbook_section(book_name):
-    book_df = filtered_df[filtered_df["Sportsbook"] == book_name].copy()
-    value_df = book_df[book_df["Status"] == "Value Look"].copy()
-    avg_edge_book = float(value_df["Edge %"].mean()) if not value_df.empty else 0.0
-    max_stake_book = int(value_df["Recommended Bet"].max()) if not value_df.empty else 0
-
-    st.markdown(f'<div class="section-title">{book_name} Opportunities</div>', unsafe_allow_html=True)
-
-    c1, c2 = st.columns([1.2, 1])
-
-    with c1:
-        st.markdown(
-            f"""
-            <div class="card">
-            <b>{book_name}</b><br>
-            Live lines from the selected leagues are shown below.<br>
-            Right now this page is ranking price discrepancies only.<br>
-            The full sports-data betting model comes next.
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with c2:
-        st.markdown(
-            f"""
-            <div class="card">
-            Value Looks: <b>{len(value_df)}</b><br>
-            Avg Edge: <b>{avg_edge_book:.2f}%</b><br>
-            Max Stake: <b>${max_stake_book}</b>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    if book_df.empty:
-        st.warning(f"No rows currently available for {book_name}.")
+    if error_message:
+        st.warning(error_message)
+        st.info("Add SPORTS_GAME_ODDS_API_KEY in Streamlit Secrets and click Refresh now.")
         return
 
-    book_df["Link"] = book_df["Link"].apply(make_link_markdown)
-    book_df = book_df[
+    raw_df = flatten_events_to_rows(events)
+
+    if raw_df.empty:
+        st.warning("No live odds came back for the leagues selected.")
+        return
+
+    scored_df = apply_smart_scoring(raw_df, min_bet=min_bet, max_bet=max_bet)
+    filtered_df = scored_df[scored_df["Sportsbook"].isin(book_filter)].copy()
+
+    if only_bets:
+        filtered_df = filtered_df[filtered_df["Status"] == "Bet"].copy()
+
+    filtered_df = filtered_df.sort_values(
+        ["Status", "Bet Score", "Edge %", "Books Quoting"],
+        ascending=[False, False, False, False],
+    )
+
+    live_bets = filtered_df[filtered_df["Status"] == "Bet"].copy()
+    best_row = live_bets.iloc[0] if not live_bets.empty else None
+    best_edge = float(live_bets["Edge %"].max()) if not live_bets.empty else 0.0
+    avg_edge = float(live_bets["Edge %"].mean()) if not live_bets.empty else 0.0
+    avg_score = float(live_bets["Bet Score"].mean()) if not live_bets.empty else 0.0
+    open_risk = int(live_bets["Recommended Bet"].sum()) if not live_bets.empty else 0
+    active_bets = int(len(live_bets))
+    refresh_time = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
+
+    st.markdown('<div class="hero-box">', unsafe_allow_html=True)
+    hero_left, hero_right = st.columns([2, 1])
+
+    with hero_left:
+        st.markdown("### Current Top Bet")
+        if best_row is not None:
+            st.markdown(
+                f"""
+                **{best_row['Pick']}**  
+                {best_row['Event']} · {best_row['Market']}  
+                Book: **{best_row['Sportsbook']}** · Odds: **{best_row['Odds']}**  
+                Edge: **{best_row['Edge %']:.2f}%** · Score: **{best_row['Bet Score']:.2f}** · Confidence: **{best_row['Confidence']}**  
+                Recommended Bet: **${best_row['Recommended Bet']}**  
+                Reason: *{best_row['Reason']}*
+                """
+            )
+            if best_row["Link"]:
+                st.markdown(f"[Open bet page]({best_row['Link']})")
+        else:
+            st.info("No bets qualify right now under the current rules.")
+
+    with hero_right:
+        st.markdown('<div class="small-label">Current Bankroll</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="big-value">${bankroll:,.2f}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="small-label">Bet Range</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="big-value">${min_bet:.0f} - ${max_bet:.0f}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="small-label">Last Refresh</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="big-value" style="font-size:1.0rem;">{refresh_time}</div>', unsafe_allow_html=True)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    with k1:
+        st.metric("Recommended Bets", active_bets)
+    with k2:
+        st.metric("Best Edge", f"{best_edge:.2f}%")
+    with k3:
+        st.metric("Average Edge", f"{avg_edge:.2f}%")
+    with k4:
+        st.metric("Average Score", f"{avg_score:.2f}")
+    with k5:
+        st.metric("Open Risk", f"${open_risk}")
+
+    st.info(
+        "This version is now auto-refreshing and stake-sizing. It still uses odds-market structure only; the next layer is adding injuries, recent form, and results tracking."
+    )
+
+    tabs = st.tabs(
         [
-            "Sport",
-            "Event",
-            "Market",
-            "Pick",
-            "Odds",
-            "Implied Prob",
-            "Model Prob",
-            "Edge %",
-            "Confidence",
-            "Recommended Bet",
-            "Status",
-            "Link",
+            "Home",
+            "Best Bets",
+            "DraftKings",
+            "FanDuel",
+            "Bet365",
+            "PrizePicks",
+            "Bankroll",
         ]
-    ].sort_values(["Status", "Edge %"], ascending=[False, False])
-
-    st.dataframe(
-        book_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Implied Prob": st.column_config.NumberColumn(format="%.2f%%"),
-            "Model Prob": st.column_config.NumberColumn(format="%.2f%%"),
-            "Edge %": st.column_config.NumberColumn(format="%.2f%%"),
-            "Recommended Bet": st.column_config.NumberColumn(format="$%d"),
-            "Link": st.column_config.LinkColumn("Open"),
-        },
     )
 
+    with tabs[0]:
+        left, right = st.columns([1.4, 1])
 
-with tabs[2]:
-    sportsbook_section("DraftKings")
+        with left:
+            st.markdown('<div class="section-title">Top Recommended Bets</div>', unsafe_allow_html=True)
+            top_df = live_bets.head(5)
 
-with tabs[3]:
-    sportsbook_section("FanDuel")
+            if top_df.empty:
+                st.warning("No recommended bets available right now.")
+            else:
+                for _, row in top_df.iterrows():
+                    link_html = f'<br><a href="{row["Link"]}" target="_blank">Open bet page</a>' if row["Link"] else ""
+                    st.markdown(
+                        f"""
+                        <div class="best-bet">
+                            <b>{row['Pick']}</b><br>
+                            {row['Event']} · {row['Market']}<br>
+                            Book: <b>{row['Sportsbook']}</b> · Odds: <b>{row['Odds']}</b><br>
+                            Edge: <b>{row['Edge %']:.2f}%</b> · Score: <b>{row['Bet Score']:.2f}</b> · Confidence: <b>{row['Confidence']}</b><br>
+                            Suggested Stake: <b>${row['Recommended Bet']}</b><br>
+                            Reason: <i>{row['Reason']}</i>
+                            {link_html}
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
 
-with tabs[4]:
-    sportsbook_section("Bet365")
+        with right:
+            st.markdown('<div class="section-title">How the score works</div>', unsafe_allow_html=True)
+            st.markdown(
+                """
+                <div class="card">
+                • Better price than the group consensus helps<br>
+                • More books quoting the same outcome boosts confidence<br>
+                • Main markets rank higher than props<br>
+                • Bets very close to lock get penalized<br>
+                • PrizePicks is treated more cautiously
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-with tabs[5]:
-    sportsbook_section("PrizePicks")
+    with tabs[1]:
+        st.markdown('<div class="section-title">Best Bets Board</div>', unsafe_allow_html=True)
 
-# -----------------------------
-# BANKROLL TAB
-# -----------------------------
-with tabs[6]:
-    st.markdown('<div class="section-title">Bankroll Management</div>', unsafe_allow_html=True)
+        display_df = filtered_df.copy()
+        display_df["Link"] = display_df["Link"].apply(make_link_markdown)
+        display_df = display_df[
+            [
+                "Sport",
+                "Event",
+                "Market Bucket",
+                "Market",
+                "Pick",
+                "Sportsbook",
+                "Odds",
+                "Implied Prob",
+                "Model Prob",
+                "Edge %",
+                "Best Line Gap %",
+                "Books Quoting",
+                "Bet Score",
+                "Confidence",
+                "Recommended Bet",
+                "Status",
+                "Reason",
+                "Link",
+            ]
+        ]
 
-    b1, b2, b3 = st.columns(3)
-    with b1:
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Implied Prob": st.column_config.NumberColumn(format="%.2f%%"),
+                "Model Prob": st.column_config.NumberColumn(format="%.2f%%"),
+                "Edge %": st.column_config.NumberColumn(format="%.2f%%"),
+                "Best Line Gap %": st.column_config.NumberColumn(format="%.2f%%"),
+                "Bet Score": st.column_config.NumberColumn(format="%.2f"),
+                "Recommended Bet": st.column_config.NumberColumn(format="$%d"),
+                "Link": st.column_config.LinkColumn("Open"),
+            },
+        )
+
+    def sportsbook_section(book_name):
+        book_df = filtered_df[filtered_df["Sportsbook"] == book_name].copy()
+        bet_df = book_df[book_df["Status"] == "Bet"].copy()
+        avg_edge_book = float(bet_df["Edge %"].mean()) if not bet_df.empty else 0.0
+        avg_score_book = float(bet_df["Bet Score"].mean()) if not bet_df.empty else 0.0
+        max_stake_book = int(bet_df["Recommended Bet"].max()) if not bet_df.empty else 0
+
+        st.markdown(f'<div class="section-title">{book_name} Opportunities</div>', unsafe_allow_html=True)
+
+        c1, c2 = st.columns([1.2, 1])
+
+        with c1:
+            st.markdown(
+                f"""
+                <div class="card">
+                <b>{book_name}</b><br>
+                This tab shows live lines from the selected leagues, ranked by the smarter scoring engine.<br>
+                The goal is not just "best price" now — it is best price with confidence controls.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with c2:
+            st.markdown(
+                f"""
+                <div class="card">
+                Recommended Bets: <b>{len(bet_df)}</b><br>
+                Avg Edge: <b>{avg_edge_book:.2f}%</b><br>
+                Avg Score: <b>{avg_score_book:.2f}</b><br>
+                Max Stake: <b>${max_stake_book}</b>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        if book_df.empty:
+            st.warning(f"No rows currently available for {book_name}.")
+            return
+
+        book_df["Link"] = book_df["Link"].apply(make_link_markdown)
+        book_df = book_df[
+            [
+                "Sport",
+                "Event",
+                "Market Bucket",
+                "Market",
+                "Pick",
+                "Odds",
+                "Edge %",
+                "Bet Score",
+                "Confidence",
+                "Recommended Bet",
+                "Status",
+                "Reason",
+                "Link",
+            ]
+        ]
+
+        st.dataframe(
+            book_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Edge %": st.column_config.NumberColumn(format="%.2f%%"),
+                "Bet Score": st.column_config.NumberColumn(format="%.2f"),
+                "Recommended Bet": st.column_config.NumberColumn(format="$%d"),
+                "Link": st.column_config.LinkColumn("Open"),
+            },
+        )
+
+    with tabs[2]:
+        sportsbook_section("DraftKings")
+
+    with tabs[3]:
+        sportsbook_section("FanDuel")
+
+    with tabs[4]:
+        sportsbook_section("Bet365")
+
+    with tabs[5]:
+        sportsbook_section("PrizePicks")
+
+    with tabs[6]:
+        st.markdown('<div class="section-title">Bankroll Management</div>', unsafe_allow_html=True)
+
+        b1, b2, b3 = st.columns(3)
+        with b1:
+            st.markdown(
+                f"""
+                <div class="card">
+                <div class="small-label">Current Bankroll</div>
+                <div class="big-value">${bankroll:,.2f}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with b2:
+            st.markdown(
+                f"""
+                <div class="card">
+                <div class="small-label">Minimum Bet</div>
+                <div class="big-value">${min_bet:.0f}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with b3:
+            st.markdown(
+                f"""
+                <div class="card">
+                <div class="small-label">Maximum Bet</div>
+                <div class="big-value">${max_bet:.0f}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
         st.markdown(
-            f"""
+            """
             <div class="card">
-            <div class="small-label">Current Bankroll</div>
-            <div class="big-value">${bankroll:,.2f}</div>
+            <b>Current bankroll rules:</b><br>
+            • No bet if edge is too small or score is too weak<br>
+            • $1 for marginal setups that still qualify<br>
+            • Higher scores push stake size up<br>
+            • Main markets can size larger than props<br>
+            • PrizePicks stays more conservative by design
             </div>
             """,
             unsafe_allow_html=True,
         )
-    with b2:
-        st.markdown(
-            f"""
-            <div class="card">
-            <div class="small-label">Minimum Bet</div>
-            <div class="big-value">${min_bet:.0f}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with b3:
-        st.markdown(
-            f"""
-            <div class="card">
-            <div class="small-label">Maximum Bet</div>
-            <div class="big-value">${max_bet:.0f}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
 
-    st.markdown(
-        """
-        <div class="card">
-        <b>Current logic:</b><br>
-        • This step is still price-shopping only<br>
-        • No provisional stake unless the line is meaningfully better than the group average<br>
-        • Stakes stay small until the full probability model is added<br>
-        • Next version will use sports stats/injuries/form, not just price differences
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+
+render_live_dashboard()
