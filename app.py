@@ -1,8 +1,11 @@
 import os
 import uuid
+from collections import defaultdict
 from datetime import datetime, timezone
 
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 
@@ -21,12 +24,18 @@ TARGET_BOOKS = {
 }
 
 DEFAULT_LEAGUES = ["NBA", "NFL", "MLB", "NHL"]
+MAIN_MARKET_BUCKETS = {"Moneyline", "Spread", "Total", "Team Total"}
+PROP_MARKET_BUCKETS = {"Player Prop", "DFS Prop"}
+
 BET_LOG_FILE = "bet_log.csv"
+SNAPSHOT_FILE = "odds_snapshot_history.csv"
 
 BET_LOG_COLUMNS = [
     "Bet ID",
     "Logged At",
     "Settled At",
+    "Event ID",
+    "Odd ID",
     "Sport",
     "Event",
     "Market Bucket",
@@ -48,31 +57,100 @@ BET_LOG_COLUMNS = [
     "PNL",
 ]
 
+SNAPSHOT_COLUMNS = [
+    "Snapshot At",
+    "Event ID",
+    "Odd ID",
+    "Sport",
+    "Event",
+    "Market Bucket",
+    "Market",
+    "Pick",
+    "Sportsbook",
+    "Odds",
+    "Implied Prob",
+    "Line",
+    "Last Update",
+    "Start Time",
+]
 
 # -----------------------------
 # FILE HELPERS
 # -----------------------------
-def ensure_bet_log_file():
-    if not os.path.exists(BET_LOG_FILE):
-        pd.DataFrame(columns=BET_LOG_COLUMNS).to_csv(BET_LOG_FILE, index=False)
+def ensure_csv_with_columns(filepath, columns):
+    if not os.path.exists(filepath):
+        pd.DataFrame(columns=columns).to_csv(filepath, index=False)
+        return
+
+    try:
+        df = pd.read_csv(filepath)
+    except Exception:
+        df = pd.DataFrame(columns=columns)
+
+    changed = False
+    for col in columns:
+        if col not in df.columns:
+            df[col] = ""
+            changed = True
+
+    if changed:
+        df = df[columns]
+        df.to_csv(filepath, index=False)
+
+
+def ensure_files():
+    ensure_csv_with_columns(BET_LOG_FILE, BET_LOG_COLUMNS)
+    ensure_csv_with_columns(SNAPSHOT_FILE, SNAPSHOT_COLUMNS)
 
 
 def load_bet_log():
-    ensure_bet_log_file()
+    ensure_files()
     try:
         df = pd.read_csv(BET_LOG_FILE)
     except Exception:
         df = pd.DataFrame(columns=BET_LOG_COLUMNS)
 
-    for col in ["Stake", "Implied Prob", "Model Prob", "Edge %", "Bet Score", "PNL"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    for col in BET_LOG_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
 
-    return df
+    for col in ["Stake", "Implied Prob", "Model Prob", "Edge %", "Bet Score", "PNL"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    return df[BET_LOG_COLUMNS]
 
 
 def save_bet_log(df):
-    df.to_csv(BET_LOG_FILE, index=False)
+    df = df.copy()
+    for col in BET_LOG_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    df[BET_LOG_COLUMNS].to_csv(BET_LOG_FILE, index=False)
+
+
+def load_snapshot_history():
+    ensure_files()
+    try:
+        df = pd.read_csv(SNAPSHOT_FILE)
+    except Exception:
+        df = pd.DataFrame(columns=SNAPSHOT_COLUMNS)
+
+    for col in SNAPSHOT_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+
+    for col in ["Implied Prob", "Line"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    return df[SNAPSHOT_COLUMNS]
+
+
+def save_snapshot_history(df):
+    df = df.copy()
+    for col in SNAPSHOT_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    df[SNAPSHOT_COLUMNS].to_csv(SNAPSHOT_FILE, index=False)
 
 
 def american_profit(odds_value, stake):
@@ -87,85 +165,8 @@ def american_profit(odds_value, stake):
     return round(stake * (100 / abs(odds)), 2)
 
 
-def log_bet_from_row(row):
-    df = load_bet_log()
-
-    duplicate_mask = (
-        (df["Event"].astype(str) == str(row["Event"]))
-        & (df["Pick"].astype(str) == str(row["Pick"]))
-        & (df["Sportsbook"].astype(str) == str(row["Sportsbook"]))
-        & (df["Odds"].astype(str) == str(row["Odds"]))
-        & (df["Bet Status"].astype(str) == "Pending")
-    )
-
-    if duplicate_mask.any():
-        return False, "That bet is already logged as pending."
-
-    stake_value = float(row.get("Stake To Bet", row.get("Recommended Bet", 0)))
-
-    bet_id = str(uuid.uuid4())[:8].upper()
-    new_row = {
-        "Bet ID": bet_id,
-        "Logged At": datetime.now().strftime("%Y-%m-%d %I:%M:%S %p"),
-        "Settled At": "",
-        "Sport": row["Sport"],
-        "Event": row["Event"],
-        "Market Bucket": row["Market Bucket"],
-        "Market": row["Market"],
-        "Pick": row["Pick"],
-        "Sportsbook": row["Sportsbook"],
-        "Odds": row["Odds"],
-        "Stake": stake_value,
-        "Implied Prob": float(row["Implied Prob"]),
-        "Model Prob": float(row["Model Prob"]),
-        "Edge %": float(row["Edge %"]),
-        "Bet Score": float(row["Bet Score"]),
-        "Confidence": row["Confidence"],
-        "Reason": row["Reason"],
-        "Start Time": row["Start Time"],
-        "Link": row["Link"],
-        "Bet Status": "Pending",
-        "Result": "",
-        "PNL": 0.0,
-    }
-
-    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-    save_bet_log(df)
-    return True, f"Bet logged successfully. Bet ID: {bet_id}"
-
-
-def settle_bet(bet_id, result):
-    df = load_bet_log()
-
-    if df.empty:
-        return False, "No bet history found."
-
-    mask = df["Bet ID"].astype(str) == str(bet_id)
-    if not mask.any():
-        return False, "Bet ID not found."
-
-    idx = df.index[mask][0]
-    stake = float(df.loc[idx, "Stake"])
-    odds = str(df.loc[idx, "Odds"])
-
-    if result == "Win":
-        pnl = american_profit(odds, stake)
-    elif result == "Loss":
-        pnl = round(-stake, 2)
-    else:
-        pnl = 0.0
-
-    df.loc[idx, "Result"] = result
-    df.loc[idx, "PNL"] = pnl
-    df.loc[idx, "Bet Status"] = "Settled"
-    df.loc[idx, "Settled At"] = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
-    save_bet_log(df)
-
-    return True, f"Bet {bet_id} settled as {result}. PNL: ${pnl:,.2f}"
-
-
 # -----------------------------
-# ODDS / MODEL HELPERS
+# BASIC HELPERS
 # -----------------------------
 def american_to_implied(odds_value):
     try:
@@ -183,12 +184,7 @@ def safe_team_name(team_dict, fallback):
     if not isinstance(team_dict, dict):
         return fallback
     names = team_dict.get("names", {})
-    return (
-        names.get("medium")
-        or names.get("long")
-        or names.get("short")
-        or fallback
-    )
+    return names.get("medium") or names.get("long") or names.get("short") or fallback
 
 
 def safe_player_name(players, stat_entity_id):
@@ -202,8 +198,8 @@ def parse_iso_datetime(value):
     if not value:
         return None
     try:
-        txt = str(value).replace("Z", "+00:00")
-        dt = datetime.fromisoformat(txt)
+        text = str(value).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(text)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc)
@@ -230,10 +226,10 @@ def classify_market(market_name, pick, sportsbook):
         return "Spread"
     if "total" in text or "over " in text or "under " in text:
         return "Total"
-    if "player" in text or "points" in text or "rebounds" in text or "assists" in text:
-        return "Player Prop"
     if "team total" in text:
         return "Team Total"
+    if "player" in text or "points" in text or "rebounds" in text or "assists" in text:
+        return "Player Prop"
     return "Other"
 
 
@@ -285,7 +281,7 @@ def build_pick_label(odd, quote, home_name, away_name, players):
 
 
 # -----------------------------
-# LIVE FETCH
+# LIVE ODDS FETCH
 # -----------------------------
 @st.cache_data(ttl=900, show_spinner="Loading live odds...")
 def fetch_events(leagues):
@@ -354,9 +350,9 @@ def flatten_events_to_rows(events):
                     players=players,
                 )
 
-                deep_link = quote.get("deeplink") or event_links.get(book_id, "")
                 sportsbook_name = TARGET_BOOKS[book_id]
                 market_bucket = classify_market(market_name, pick_label, sportsbook_name)
+                deep_link = quote.get("deeplink") or event_links.get(book_id, "")
 
                 rows.append(
                     {
@@ -373,7 +369,7 @@ def flatten_events_to_rows(events):
                         "Sportsbook ID": book_id,
                         "Odds": str(odds_value),
                         "Implied Prob": implied_prob,
-                        "Line": quote.get("spread") or quote.get("overUnder") or "",
+                        "Line": quote.get("spread") if quote.get("spread") is not None else quote.get("overUnder"),
                         "Last Update": quote.get("lastUpdatedAt", ""),
                         "Link": deep_link,
                     }
@@ -383,61 +379,159 @@ def flatten_events_to_rows(events):
 
 
 # -----------------------------
+# SNAPSHOT / LINE-MOVEMENT HELPERS
+# -----------------------------
+def update_snapshot_history(all_rows):
+    if all_rows.empty:
+        return
+
+    history = load_snapshot_history()
+
+    snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    snap = all_rows[
+        [
+            "Event ID",
+            "Odd ID",
+            "Sport",
+            "Event",
+            "Market Bucket",
+            "Market",
+            "Pick",
+            "Sportsbook",
+            "Odds",
+            "Implied Prob",
+            "Line",
+            "Last Update",
+            "Start Time",
+        ]
+    ].copy()
+    snap["Snapshot At"] = snapshot_time
+    snap = snap[SNAPSHOT_COLUMNS]
+
+    combined = pd.concat([history, snap], ignore_index=True)
+    combined["Dedup Key"] = (
+        combined["Event ID"].astype(str) + "||"
+        + combined["Odd ID"].astype(str) + "||"
+        + combined["Sportsbook"].astype(str) + "||"
+        + combined["Last Update"].astype(str) + "||"
+        + combined["Odds"].astype(str)
+    )
+    combined = combined.drop_duplicates(subset=["Dedup Key"], keep="last").drop(columns=["Dedup Key"])
+    save_snapshot_history(combined)
+
+
+def attach_line_history(all_rows):
+    if all_rows.empty:
+        all_rows["Opening Odds"] = ""
+        all_rows["Opening Implied Prob"] = 0.0
+        all_rows["Line Move %"] = 0.0
+        all_rows["Line Trend"] = "New"
+        return all_rows
+
+    history = load_snapshot_history()
+    if history.empty:
+        all_rows = all_rows.copy()
+        all_rows["Opening Odds"] = all_rows["Odds"]
+        all_rows["Opening Implied Prob"] = all_rows["Implied Prob"]
+        all_rows["Line Move %"] = 0.0
+        all_rows["Line Trend"] = "New"
+        return all_rows
+
+    history = history.copy()
+    history["Snapshot At Parsed"] = pd.to_datetime(history["Snapshot At"], errors="coerce")
+    history = history.sort_values("Snapshot At Parsed")
+
+    first_seen = history.groupby(["Event ID", "Odd ID", "Sportsbook"], as_index=False).first()
+    first_seen = first_seen.rename(
+        columns={
+            "Odds": "Opening Odds",
+            "Implied Prob": "Opening Implied Prob",
+        }
+    )
+
+    enriched = all_rows.merge(
+        first_seen[["Event ID", "Odd ID", "Sportsbook", "Opening Odds", "Opening Implied Prob"]],
+        on=["Event ID", "Odd ID", "Sportsbook"],
+        how="left",
+    )
+    enriched["Opening Odds"] = enriched["Opening Odds"].fillna(enriched["Odds"])
+    enriched["Opening Implied Prob"] = pd.to_numeric(enriched["Opening Implied Prob"], errors="coerce").fillna(
+        enriched["Implied Prob"]
+    )
+    enriched["Line Move %"] = (enriched["Implied Prob"] - enriched["Opening Implied Prob"]).round(2)
+
+    def line_trend_label(change):
+        if change >= 1.5:
+            return "Worse Now"
+        if change <= -1.5:
+            return "Improving"
+        return "Stable"
+
+    enriched["Line Trend"] = enriched["Line Move %"].apply(line_trend_label)
+    return enriched
+
+
+# -----------------------------
 # SCORING ENGINE
 # -----------------------------
 def confidence_from_score(score):
-    if score >= 7.0:
+    if score >= 7.5:
         return "Elite"
-    if score >= 5.0:
+    if score >= 5.5:
         return "High"
-    if score >= 3.0:
+    if score >= 3.5:
         return "Medium"
     return "Low"
 
 
 def market_weight(bucket):
-    weights = {
-        "Moneyline": 1.25,
-        "Spread": 1.20,
-        "Total": 1.10,
+    return {
+        "Moneyline": 1.35,
+        "Spread": 1.25,
+        "Total": 1.15,
         "Team Total": 0.85,
         "Player Prop": 0.55,
         "DFS Prop": 0.35,
         "Other": 0.40,
-    }
-    return weights.get(bucket, 0.40)
+    }.get(bucket, 0.40)
 
 
 def time_penalty(minutes):
     if minutes is None:
         return 0.0
     if minutes < 0:
-        return -2.0
+        return -2.5
     if minutes < 15:
-        return -1.3
+        return -1.5
     if minutes < 60:
-        return -0.8
+        return -0.9
     if minutes < 180:
-        return -0.3
+        return -0.4
     return 0.0
 
 
 def book_penalty(book_name):
-    if book_name == "PrizePicks":
-        return -0.6
+    return -0.6 if book_name == "PrizePicks" else 0.0
+
+
+def line_trend_adjustment(label):
+    if label == "Improving":
+        return 0.15
+    if label == "Worse Now":
+        return -0.15
     return 0.0
 
 
 def bet_size_from_score(edge, score, min_bet, max_bet):
-    if edge < 1.0 or score < 3.0:
+    if edge < 1.0 or score < 3.5:
         return 0
-    if score < 4.0:
+    if score < 4.5:
         return int(min_bet)
-    if score < 5.0:
+    if score < 5.5:
         return int(min(max_bet, max(min_bet, 3)))
-    if score < 6.0:
+    if score < 6.5:
         return int(min(max_bet, max(min_bet, 5)))
-    if score < 7.0:
+    if score < 7.5:
         return int(min(max_bet, max(min_bet, 7)))
     return int(min(max_bet, max(min_bet, 10)))
 
@@ -445,38 +539,50 @@ def bet_size_from_score(edge, score, min_bet, max_bet):
 def build_reason(row):
     parts = []
 
-    if row["Is Best Price"]:
-        parts.append(f"best current price across {int(row['Books Quoting'])} books")
+    if row["Is Best Book For Pick"]:
+        parts.append(f"best current number across {int(row['Books Quoting'])} books")
     else:
-        parts.append(f"positive price edge vs {int(row['Books Quoting'])} book consensus")
+        parts.append("not the best book for this outcome")
+
+    if row["Edge %"] >= 3:
+        parts.append("healthy edge vs consensus")
+    elif row["Edge %"] >= 1:
+        parts.append("small but positive edge")
 
     bucket = row["Market Bucket"]
-    if bucket in {"Moneyline", "Spread", "Total"}:
-        parts.append(f"{bucket.lower()} market ranks stronger")
-    elif bucket in {"Player Prop", "DFS Prop"}:
-        parts.append("prop market keeps sizing conservative")
+    if bucket in MAIN_MARKET_BUCKETS:
+        parts.append(f"{bucket.lower()} market gets stronger weighting")
+    elif bucket in PROP_MARKET_BUCKETS:
+        parts.append("prop market gets a smaller weight")
 
-    mins = row["Minutes To Start"]
-    if mins is not None:
-        if mins >= 180:
-            parts.append("plenty of time before start")
-        elif mins >= 60:
-            parts.append("moderate time before lock")
+    minutes = row["Minutes To Start"]
+    if minutes is not None:
+        if minutes >= 180:
+            parts.append("not too close to lock")
+        elif minutes >= 60:
+            parts.append("moderate time before start")
         else:
-            parts.append("close to lock, so confidence is reduced")
+            parts.append("close to lock so confidence is trimmed")
+
+    if row["Line Trend"] == "Improving":
+        parts.append("current price is better than earliest seen")
+    elif row["Line Trend"] == "Worse Now":
+        parts.append("market has moved against this number")
 
     if row["Sportsbook"] == "PrizePicks":
-        parts.append("PrizePicks is treated more cautiously")
+        parts.append("PrizePicks is handled more conservatively")
 
     return " • ".join(parts)
 
 
-def apply_smart_scoring(df, min_bet, max_bet):
-    if df.empty:
-        return df
+def apply_smart_scoring(all_rows, min_bet, max_bet):
+    if all_rows.empty:
+        return all_rows
+
+    scored = all_rows.copy()
 
     market_stats = (
-        df.groupby(["Event ID", "Odd ID"])["Implied Prob"]
+        scored.groupby(["Event ID", "Odd ID"])["Implied Prob"]
         .agg(["mean", "min", "max", "count", "std"])
         .reset_index()
         .rename(
@@ -490,26 +596,46 @@ def apply_smart_scoring(df, min_bet, max_bet):
         )
     )
 
-    scored = df.merge(market_stats, on=["Event ID", "Odd ID"], how="left")
+    scored = scored.merge(market_stats, on=["Event ID", "Odd ID"], how="left")
     scored["Prob StdDev"] = scored["Prob StdDev"].fillna(0.0)
     scored["Model Prob"] = scored["Consensus Prob"].round(2)
     scored["Edge %"] = (scored["Consensus Prob"] - scored["Implied Prob"]).round(2)
     scored["Best Line Gap %"] = (scored["Worst Price Prob"] - scored["Implied Prob"]).round(2)
-    scored["Is Best Price"] = scored["Implied Prob"] <= (scored["Best Price Prob"] + 0.0001)
+
+    scored = scored.sort_values(
+        ["Event ID", "Odd ID", "Implied Prob", "Bet Score"] if "Bet Score" in scored.columns else ["Event ID", "Odd ID", "Implied Prob"],
+        ascending=True,
+    )
+
+    # provisional best-book flag before score exists
+    scored["Sort Rank"] = scored.groupby(["Event ID", "Odd ID"]).cumcount() + 1
+    scored["Is Best Book For Pick"] = scored["Sort Rank"] == 1
+    scored = scored.drop(columns=["Sort Rank"])
 
     scored["Market Weight"] = scored["Market Bucket"].apply(market_weight)
     scored["Time Penalty"] = scored["Minutes To Start"].apply(time_penalty)
     scored["Book Penalty"] = scored["Sportsbook"].apply(book_penalty)
     scored["Books Bonus"] = scored["Books Quoting"].apply(lambda x: min((x - 1) * 0.55, 2.20))
+    scored["Line Trend Bonus"] = scored["Line Trend"].apply(line_trend_adjustment)
 
     scored["Bet Score"] = (
         scored["Edge %"] * 0.95
-        + scored["Best Line Gap %"] * 0.35
+        + scored["Best Line Gap %"] * 0.40
         + scored["Books Bonus"]
         + scored["Market Weight"]
         + scored["Time Penalty"]
         + scored["Book Penalty"]
+        + scored["Line Trend Bonus"]
     ).round(2)
+
+    # re-pick best book using price first, then score
+    scored = scored.sort_values(
+        ["Event ID", "Odd ID", "Implied Prob", "Bet Score"],
+        ascending=[True, True, True, False],
+    )
+    scored["Row Rank"] = scored.groupby(["Event ID", "Odd ID"]).cumcount() + 1
+    scored["Is Best Book For Pick"] = scored["Row Rank"] == 1
+    scored = scored.drop(columns=["Row Rank"])
 
     scored["Confidence"] = scored["Bet Score"].apply(confidence_from_score)
     scored["Recommended Bet"] = scored.apply(
@@ -521,115 +647,302 @@ def apply_smart_scoring(df, min_bet, max_bet):
         ),
         axis=1,
     )
-    scored["Status"] = scored["Recommended Bet"].apply(lambda x: "Bet" if x > 0 else "No Bet")
+    scored["Preliminary Status"] = scored["Recommended Bet"].apply(lambda x: "Bet" if x > 0 else "No Bet")
     scored["Reason"] = scored.apply(build_reason, axis=1)
     return scored
 
 
-def apply_exposure_cap(df, max_total_exposure, min_bet):
-    df = df.copy()
-    df["Stake To Bet"] = 0
-    df["Exposure Status"] = "No Bet"
-    df["Final Status"] = "No Bet"
+def apply_advanced_risk_controls(
+    candidate_rows,
+    min_bet,
+    max_total_exposure,
+    max_sport_exposure,
+    max_event_exposure,
+    max_book_exposure,
+    max_prop_exposure,
+    min_books_quoting,
+    min_edge_pct,
+    min_score,
+    min_minutes_to_start,
+    max_bets_per_event,
+    limit_main_markets_per_event,
+):
+    candidates = candidate_rows.copy()
 
-    if df.empty:
-        return df
+    candidates["Stake To Bet"] = 0
+    candidates["Exposure Status"] = "No Bet"
+    candidates["Final Status"] = "No Bet"
+    candidates["Allocation Notes"] = ""
+    candidates["Correlation Flag"] = ""
 
-    df.loc[df["Status"] == "No Bet", "Exposure Status"] = "No Bet"
-    df.loc[df["Status"] == "No Bet", "Final Status"] = "No Bet"
+    total_used = 0.0
+    sport_used = defaultdict(float)
+    event_used = defaultdict(float)
+    book_used = defaultdict(float)
+    prop_used = 0.0
+    event_bets_count = defaultdict(int)
+    event_main_bet_taken = defaultdict(bool)
+    event_bucket_taken = defaultdict(set)
 
-    remaining = float(max_total_exposure)
-
-    candidate_idx = df[df["Status"] == "Bet"].sort_values(
+    ordered_idx = candidates.sort_values(
         ["Bet Score", "Edge %", "Books Quoting"],
         ascending=[False, False, False],
     ).index
 
-    for idx in candidate_idx:
-        if remaining < float(min_bet):
-            df.at[idx, "Stake To Bet"] = 0
-            df.at[idx, "Exposure Status"] = "Exposure Cap Reached"
-            df.at[idx, "Final Status"] = "Pass"
-            continue
+    for idx in ordered_idx:
+        row = candidates.loc[idx]
+        notes = []
+        final_status = "Bet"
+        correlation_flag = ""
 
-        suggested = float(df.at[idx, "Recommended Bet"])
-        allocation = int(min(suggested, remaining))
+        if row["Preliminary Status"] != "Bet":
+            final_status = "No Bet"
+            notes.append("score or edge not strong enough")
+        elif row["Books Quoting"] < min_books_quoting:
+            final_status = "Pass"
+            notes.append(f"only {int(row['Books Quoting'])} books quoting")
+        elif row["Edge %"] < min_edge_pct:
+            final_status = "Pass"
+            notes.append(f"edge below {min_edge_pct:.1f}% threshold")
+        elif row["Bet Score"] < min_score:
+            final_status = "Pass"
+            notes.append(f"score below {min_score:.1f}")
+        elif row["Minutes To Start"] is not None and row["Minutes To Start"] < min_minutes_to_start:
+            final_status = "Pass"
+            notes.append(f"inside {int(min_minutes_to_start)} minutes to start")
+        elif event_bets_count[row["Event"]] >= max_bets_per_event:
+            final_status = "Pass"
+            correlation_flag = "Event Cap"
+            notes.append("event bet count cap reached")
+        elif row["Market Bucket"] in event_bucket_taken[row["Event"]]:
+            final_status = "Pass"
+            correlation_flag = "Duplicate Bucket"
+            notes.append("same event/market bucket already selected")
+        elif (
+            limit_main_markets_per_event
+            and row["Market Bucket"] in MAIN_MARKET_BUCKETS
+            and event_main_bet_taken[row["Event"]]
+        ):
+            final_status = "Pass"
+            correlation_flag = "Main-Market Correlation"
+            notes.append("main market on this event already selected")
 
-        if allocation < float(min_bet):
-            df.at[idx, "Stake To Bet"] = 0
-            df.at[idx, "Exposure Status"] = "Exposure Cap Reached"
-            df.at[idx, "Final Status"] = "Pass"
-            continue
+        if final_status == "Bet":
+            remaining_total = max_total_exposure - total_used
+            remaining_sport = max_sport_exposure - sport_used[row["Sport"]]
+            remaining_event = max_event_exposure - event_used[row["Event"]]
+            remaining_book = max_book_exposure - book_used[row["Sportsbook"]]
+            remaining_prop = max_prop_exposure - prop_used if row["Market Bucket"] in PROP_MARKET_BUCKETS else row["Recommended Bet"]
 
-        df.at[idx, "Stake To Bet"] = allocation
-        df.at[idx, "Final Status"] = "Bet"
+            allowed = min(
+                float(row["Recommended Bet"]),
+                float(remaining_total),
+                float(remaining_sport),
+                float(remaining_event),
+                float(remaining_book),
+                float(remaining_prop),
+            )
 
-        if allocation < suggested:
-            df.at[idx, "Exposure Status"] = "Trimmed To Fit Cap"
-        else:
-            df.at[idx, "Exposure Status"] = "Within Cap"
+            if allowed < float(min_bet):
+                final_status = "Pass"
+                notes.append("trimmed below minimum by exposure caps")
+            else:
+                stake = int(allowed)
+                candidates.at[idx, "Stake To Bet"] = stake
+                total_used += stake
+                sport_used[row["Sport"]] += stake
+                event_used[row["Event"]] += stake
+                book_used[row["Sportsbook"]] += stake
+                if row["Market Bucket"] in PROP_MARKET_BUCKETS:
+                    prop_used += stake
+                event_bets_count[row["Event"]] += 1
+                event_bucket_taken[row["Event"]].add(row["Market Bucket"])
+                if row["Market Bucket"] in MAIN_MARKET_BUCKETS:
+                    event_main_bet_taken[row["Event"]] = True
 
-        remaining -= allocation
+                if stake < float(row["Recommended Bet"]):
+                    notes.append("stake trimmed by exposure caps")
+                    candidates.at[idx, "Exposure Status"] = "Trimmed To Fit Cap"
+                else:
+                    candidates.at[idx, "Exposure Status"] = "Within Cap"
 
-    return df
+        if final_status != "Bet":
+            candidates.at[idx, "Stake To Bet"] = 0
+            if any(term in " ".join(notes) for term in ["cap", "trimmed", "exposure"]):
+                candidates.at[idx, "Exposure Status"] = "Exposure Cap Reached"
+            elif correlation_flag:
+                candidates.at[idx, "Exposure Status"] = "Correlation Pass"
+            else:
+                candidates.at[idx, "Exposure Status"] = "No Bet"
+
+        candidates.at[idx, "Final Status"] = final_status
+        candidates.at[idx, "Allocation Notes"] = " • ".join(notes)
+        candidates.at[idx, "Correlation Flag"] = correlation_flag
+
+    return candidates
 
 
-def build_compare_table(df):
-    if df.empty:
-        return pd.DataFrame()
+def merge_candidate_statuses(all_rows, candidates):
+    if all_rows.empty:
+        return all_rows
 
-    group_cols = ["Event ID", "Odd ID", "Sport", "Event", "Market Bucket", "Market", "Pick"]
+    merged = all_rows.copy()
+    merged["Stake To Bet"] = 0
+    merged["Exposure Status"] = "No Bet"
+    merged["Final Status"] = "No Bet"
+    merged["Allocation Notes"] = ""
+    merged["Correlation Flag"] = ""
 
-    price_stats = (
-        df.groupby(group_cols)
-        .agg(
-            Books_Quoting=("Sportsbook", "nunique"),
-            Best_Implied_Prob=("Implied Prob", "min"),
-            Worst_Implied_Prob=("Implied Prob", "max"),
-        )
-        .reset_index()
-    )
-
-    price_stats["Line Gap %"] = (price_stats["Worst_Implied_Prob"] - price_stats["Best_Implied_Prob"]).round(2)
-
-    idx_best = df.groupby(["Event ID", "Odd ID"])["Implied Prob"].idxmin()
-    best_rows = df.loc[idx_best, [
+    candidate_cols = [
         "Event ID",
         "Odd ID",
         "Sportsbook",
-        "Odds",
-        "Edge %",
-        "Bet Score",
-        "Confidence",
         "Stake To Bet",
-        "Final Status",
         "Exposure Status",
-        "Reason",
-        "Link",
-    ]].copy()
+        "Final Status",
+        "Allocation Notes",
+        "Correlation Flag",
+    ]
+    if not candidates.empty:
+        merged = merged.merge(
+            candidates[candidate_cols],
+            on=["Event ID", "Odd ID", "Sportsbook"],
+            how="left",
+            suffixes=("", "_cand"),
+        )
+        for col in ["Stake To Bet", "Exposure Status", "Final Status", "Allocation Notes", "Correlation Flag"]:
+            merged[col] = merged[f"{col}_cand"].combine_first(merged[col])
+            merged = merged.drop(columns=[f"{col}_cand"])
 
-    best_rows = best_rows.rename(columns={
-        "Sportsbook": "Best Sportsbook",
-        "Odds": "Best Odds",
-        "Edge %": "Best Edge %",
-        "Bet Score": "Best Bet Score",
-        "Confidence": "Best Confidence",
-        "Stake To Bet": "Stake To Bet",
-        "Final Status": "Final Status",
-        "Exposure Status": "Exposure Status",
-        "Reason": "Best Reason",
-        "Link": "Best Link",
-    })
+    # rows that are not best book but belong to an outcome where another book is the final bet
+    final_outcomes = set(
+        zip(
+            candidates.loc[candidates["Final Status"] == "Bet", "Event ID"],
+            candidates.loc[candidates["Final Status"] == "Bet", "Odd ID"],
+        )
+    ) if not candidates.empty else set()
 
-    pivot = df.pivot_table(
+    def other_book_status(row):
+        if row["Is Best Book For Pick"]:
+            return row["Final Status"]
+        key = (row["Event ID"], row["Odd ID"])
+        if key in final_outcomes:
+            return "Shop Better Book"
+        return "No Bet"
+
+    merged["Display Status"] = merged.apply(other_book_status, axis=1)
+    return merged
+
+
+def build_factor_text(row):
+    pieces = [
+        f"Edge {row['Edge %']:.2f}%",
+        f"Line gap {row['Best Line Gap %']:.2f}%",
+        f"Books bonus {row['Books Bonus']:.2f}",
+        f"Market weight {row['Market Weight']:.2f}",
+        f"Time penalty {row['Time Penalty']:.2f}",
+        f"Book penalty {row['Book Penalty']:.2f}",
+        f"Trend adj {row['Line Trend Bonus']:.2f}",
+    ]
+    return " | ".join(pieces)
+
+
+def build_compare_table(all_rows, candidates):
+    if all_rows.empty:
+        return pd.DataFrame()
+
+    group_cols = ["Event ID", "Odd ID", "Sport", "Event", "Start Time", "Market Bucket", "Market", "Pick"]
+
+    odds_pivot = all_rows.pivot_table(
         index=group_cols,
         columns="Sportsbook",
         values="Odds",
         aggfunc="first",
     ).reset_index()
 
-    compare = pivot.merge(price_stats, on=group_cols, how="left")
-    compare = compare.merge(best_rows, on=["Event ID", "Odd ID"], how="left")
+    prob_pivot = all_rows.pivot_table(
+        index=group_cols,
+        columns="Sportsbook",
+        values="Implied Prob",
+        aggfunc="first",
+    ).reset_index()
+
+    prob_pivot.columns = [c if isinstance(c, str) else c for c in prob_pivot.columns]
+
+    gap_stats = (
+        all_rows.groupby(group_cols)["Implied Prob"]
+        .agg(["min", "max", "count"])
+        .reset_index()
+        .rename(columns={"min": "Best Implied Prob", "max": "Worst Implied Prob", "count": "Books Quoting"})
+    )
+    gap_stats["Line Gap %"] = (gap_stats["Worst Implied Prob"] - gap_stats["Best Implied Prob"]).round(2)
+
+    best_book_rows = all_rows[all_rows["Is Best Book For Pick"]].copy()
+    if not candidates.empty:
+        best_book_rows = best_book_rows.merge(
+            candidates[
+                [
+                    "Event ID",
+                    "Odd ID",
+                    "Sportsbook",
+                    "Stake To Bet",
+                    "Final Status",
+                    "Exposure Status",
+                    "Allocation Notes",
+                    "Correlation Flag",
+                ]
+            ],
+            on=["Event ID", "Odd ID", "Sportsbook"],
+            how="left",
+        )
+    else:
+        best_book_rows["Stake To Bet"] = 0
+        best_book_rows["Final Status"] = "No Bet"
+        best_book_rows["Exposure Status"] = "No Bet"
+        best_book_rows["Allocation Notes"] = ""
+        best_book_rows["Correlation Flag"] = ""
+
+    best_book_rows = best_book_rows.rename(
+        columns={
+            "Sportsbook": "Best Sportsbook",
+            "Odds": "Best Odds",
+            "Edge %": "Best Edge %",
+            "Bet Score": "Best Bet Score",
+            "Confidence": "Best Confidence",
+            "Reason": "Best Reason",
+            "Link": "Best Link",
+            "Line Trend": "Best Line Trend",
+            "Line Move %": "Best Line Move %",
+        }
+    )
+
+    compare = odds_pivot.merge(gap_stats, on=group_cols, how="left")
+    compare = compare.merge(
+        best_book_rows[
+            [
+                "Event ID",
+                "Odd ID",
+                "Best Sportsbook",
+                "Best Odds",
+                "Best Edge %",
+                "Best Bet Score",
+                "Best Confidence",
+                "Stake To Bet",
+                "Final Status",
+                "Exposure Status",
+                "Allocation Notes",
+                "Correlation Flag",
+                "Best Reason",
+                "Best Link",
+                "Best Line Trend",
+                "Best Line Move %",
+                "Books Bonus",
+                "Opening Odds",
+            ]
+        ],
+        on=["Event ID", "Odd ID"],
+        how="left",
+    )
 
     for col in ["DraftKings", "FanDuel", "Bet365", "PrizePicks"]:
         if col not in compare.columns:
@@ -637,7 +950,7 @@ def build_compare_table(df):
 
     def shop_alert(row):
         gap = row["Line Gap %"]
-        books = row["Books_Quoting"]
+        books = row["Books Quoting"]
         if books >= 3 and gap >= 4:
             return "Strong Shop"
         if books >= 2 and gap >= 2:
@@ -647,14 +960,63 @@ def build_compare_table(df):
         return "Flat"
 
     compare["Shop Alert"] = compare.apply(shop_alert, axis=1)
-    compare["Status Rank"] = compare["Final Status"].map({"Bet": 2, "Pass": 1, "No Bet": 0}).fillna(0)
+    compare["Status Rank"] = compare["Final Status"].map({"Bet": 3, "Pass": 2, "No Bet": 1}).fillna(0)
 
-    compare = compare.sort_values(
+    return compare.sort_values(
         ["Status Rank", "Best Bet Score", "Line Gap %"],
         ascending=[False, False, False],
     ).reset_index(drop=True)
 
-    return compare
+
+def attach_observed_clv(bet_log):
+    if bet_log.empty:
+        bet_log["Latest Odds Seen"] = ""
+        bet_log["Latest Implied Prob"] = 0.0
+        bet_log["Observed CLV %"] = 0.0
+        bet_log["CLV Label"] = "No Data"
+        return bet_log
+
+    history = load_snapshot_history()
+    if history.empty:
+        bet_log = bet_log.copy()
+        bet_log["Latest Odds Seen"] = ""
+        bet_log["Latest Implied Prob"] = 0.0
+        bet_log["Observed CLV %"] = 0.0
+        bet_log["CLV Label"] = "No Data"
+        return bet_log
+
+    history = history.copy()
+    history["Snapshot At Parsed"] = pd.to_datetime(history["Snapshot At"], errors="coerce")
+    history = history.sort_values("Snapshot At Parsed")
+    latest = history.groupby(["Event ID", "Odd ID", "Sportsbook"], as_index=False).last()
+    latest = latest.rename(
+        columns={
+            "Odds": "Latest Odds Seen",
+            "Implied Prob": "Latest Implied Prob",
+        }
+    )
+
+    enriched = bet_log.merge(
+        latest[["Event ID", "Odd ID", "Sportsbook", "Latest Odds Seen", "Latest Implied Prob"]],
+        on=["Event ID", "Odd ID", "Sportsbook"],
+        how="left",
+    )
+    enriched["Latest Implied Prob"] = pd.to_numeric(enriched["Latest Implied Prob"], errors="coerce").fillna(0.0)
+    enriched["Observed CLV %"] = (enriched["Latest Implied Prob"] - enriched["Implied Prob"]).round(2)
+
+    def clv_label(value):
+        if value >= 1.5:
+            return "Beating Market"
+        if value >= 0.5:
+            return "Ahead"
+        if value > -0.5:
+            return "Flat"
+        if value > -1.5:
+            return "Behind"
+        return "Losing Market"
+
+    enriched["CLV Label"] = enriched["Observed CLV %"].apply(clv_label)
+    return enriched
 
 
 def get_live_board(
@@ -665,46 +1027,310 @@ def get_live_board(
     min_bet,
     max_bet,
     max_total_exposure,
-    only_bets=False,
+    max_sport_exposure,
+    max_event_exposure,
+    max_book_exposure,
+    max_prop_exposure,
+    min_books_quoting,
+    min_edge_pct,
+    min_score,
+    min_minutes_to_start,
+    max_bets_per_event,
+    limit_main_markets_per_event,
+    only_final_bets=False,
 ):
     events, error_message = fetch_events(leagues)
     if error_message:
         return pd.DataFrame(), pd.DataFrame(), error_message
 
-    raw_df = flatten_events_to_rows(events)
-    if raw_df.empty:
-        return pd.DataFrame(), pd.DataFrame(), "No live odds came back for the leagues selected."
+    raw_rows = flatten_events_to_rows(events)
+    if raw_rows.empty:
+        return pd.DataFrame(), pd.DataFrame(), "No live odds came back for the selected leagues."
 
-    scored_df = apply_smart_scoring(raw_df, min_bet=min_bet, max_bet=max_bet)
+    update_snapshot_history(raw_rows)
+    enriched_rows = attach_line_history(raw_rows)
+    scored = apply_smart_scoring(enriched_rows, min_bet=min_bet, max_bet=max_bet)
 
-    filtered_df = scored_df[
-        scored_df["Sportsbook"].isin(sportsbooks)
-        & scored_df["Market Bucket"].isin(market_buckets)
-        & scored_df["Confidence"].isin(confidence_levels)
+    filtered = scored[
+        scored["Sportsbook"].isin(sportsbooks)
+        & scored["Market Bucket"].isin(market_buckets)
+        & scored["Confidence"].isin(confidence_levels)
     ].copy()
 
-    filtered_df = apply_exposure_cap(
-        filtered_df,
-        max_total_exposure=max_total_exposure,
+    candidates = filtered[filtered["Is Best Book For Pick"]].copy()
+    candidates = apply_advanced_risk_controls(
+        candidates,
         min_bet=min_bet,
+        max_total_exposure=max_total_exposure,
+        max_sport_exposure=max_sport_exposure,
+        max_event_exposure=max_event_exposure,
+        max_book_exposure=max_book_exposure,
+        max_prop_exposure=max_prop_exposure,
+        min_books_quoting=min_books_quoting,
+        min_edge_pct=min_edge_pct,
+        min_score=min_score,
+        min_minutes_to_start=min_minutes_to_start,
+        max_bets_per_event=max_bets_per_event,
+        limit_main_markets_per_event=limit_main_markets_per_event,
     )
 
-    filtered_df["Status Rank"] = filtered_df["Final Status"].map({"Bet": 2, "Pass": 1, "No Bet": 0}).fillna(0)
+    final_rows = merge_candidate_statuses(filtered, candidates)
+    compare = build_compare_table(filtered, candidates)
 
-    if only_bets:
-        filtered_df = filtered_df[filtered_df["Final Status"] == "Bet"].copy()
+    if only_final_bets:
+        final_rows = final_rows[final_rows["Final Status"] == "Bet"].copy()
 
-    filtered_df = filtered_df.sort_values(
+    final_rows["Status Rank"] = final_rows["Display Status"].map(
+        {"Bet": 4, "Pass": 3, "Shop Better Book": 2, "No Bet": 1}
+    ).fillna(0)
+
+    final_rows = final_rows.sort_values(
         ["Status Rank", "Bet Score", "Edge %", "Books Quoting"],
         ascending=[False, False, False, False],
     ).reset_index(drop=True)
 
-    compare_df = build_compare_table(filtered_df)
-    return filtered_df, compare_df, ""
+    return final_rows, compare, ""
 
 
 # -----------------------------
-# STYLING - CRIMSON FOOTBALL THEME
+# TRACKER HELPERS
+# -----------------------------
+def log_bet_from_row(row):
+    df = load_bet_log()
+
+    duplicate_mask = (
+        (df["Event ID"].astype(str) == str(row["Event ID"]))
+        & (df["Odd ID"].astype(str) == str(row["Odd ID"]))
+        & (df["Sportsbook"].astype(str) == str(row["Sportsbook"]))
+        & (df["Bet Status"].astype(str) == "Pending")
+    )
+    if duplicate_mask.any():
+        return False, "That bet is already logged as pending."
+
+    stake_value = float(row.get("Stake To Bet", row.get("Recommended Bet", 0)))
+    if stake_value <= 0:
+        return False, "This row does not have a positive stake to log."
+
+    new_row = {
+        "Bet ID": str(uuid.uuid4())[:8].upper(),
+        "Logged At": datetime.now().strftime("%Y-%m-%d %I:%M:%S %p"),
+        "Settled At": "",
+        "Event ID": row["Event ID"],
+        "Odd ID": row["Odd ID"],
+        "Sport": row["Sport"],
+        "Event": row["Event"],
+        "Market Bucket": row["Market Bucket"],
+        "Market": row["Market"],
+        "Pick": row["Pick"],
+        "Sportsbook": row["Sportsbook"],
+        "Odds": row["Odds"],
+        "Stake": float(stake_value),
+        "Implied Prob": float(row["Implied Prob"]),
+        "Model Prob": float(row["Model Prob"]),
+        "Edge %": float(row["Edge %"]),
+        "Bet Score": float(row["Bet Score"]),
+        "Confidence": row["Confidence"],
+        "Reason": row["Reason"],
+        "Start Time": row["Start Time"],
+        "Link": row["Link"],
+        "Bet Status": "Pending",
+        "Result": "",
+        "PNL": 0.0,
+    }
+
+    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    save_bet_log(df)
+    return True, f"Bet logged successfully. Bet ID: {new_row['Bet ID']}"
+
+
+def settle_bet(bet_id, result):
+    df = load_bet_log()
+    if df.empty:
+        return False, "No bet history found."
+
+    mask = df["Bet ID"].astype(str) == str(bet_id)
+    if not mask.any():
+        return False, "Bet ID not found."
+
+    idx = df.index[mask][0]
+    stake = float(df.loc[idx, "Stake"])
+    odds = str(df.loc[idx, "Odds"])
+
+    if result == "Win":
+        pnl = american_profit(odds, stake)
+    elif result == "Loss":
+        pnl = round(-stake, 2)
+    else:
+        pnl = 0.0
+
+    df.loc[idx, "Result"] = result
+    df.loc[idx, "PNL"] = pnl
+    df.loc[idx, "Bet Status"] = "Settled"
+    df.loc[idx, "Settled At"] = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
+    save_bet_log(df)
+    return True, f"Bet {bet_id} settled as {result}. PNL: ${pnl:,.2f}"
+
+
+# -----------------------------
+# CHART HELPERS
+# -----------------------------
+def style_figure(fig, height=350):
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(255,255,255,0.04)",
+        font=dict(color="#F8F8F8"),
+        margin=dict(l=30, r=20, t=50, b=30),
+        height=height,
+    )
+    return fig
+
+
+def plot_bankroll_curve(settled_df, starting_bankroll):
+    if settled_df.empty:
+        return None
+
+    df = settled_df.copy()
+    df["Sort Time"] = pd.to_datetime(df["Settled At"], errors="coerce")
+    df = df.dropna(subset=["Sort Time"]).sort_values("Sort Time")
+    if df.empty:
+        return None
+
+    df["Running Bankroll"] = float(starting_bankroll) + df["PNL"].cumsum()
+    fig = px.line(df, x="Sort Time", y="Running Bankroll", title="Bankroll Curve", markers=True)
+    fig.update_traces(line=dict(color="#FFFFFF", width=3), marker=dict(color="#F4B6C2", size=7))
+    return style_figure(fig)
+
+
+def plot_profit_by_sportsbook(settled_df):
+    if settled_df.empty:
+        return None
+    summary = settled_df.groupby("Sportsbook", as_index=False)["PNL"].sum().sort_values("PNL", ascending=False)
+    fig = px.bar(summary, x="Sportsbook", y="PNL", title="Profit / Loss by Sportsbook")
+    fig.update_traces(marker_color="#9E1B32")
+    return style_figure(fig)
+
+
+def plot_profit_by_market(settled_df):
+    if settled_df.empty:
+        return None
+    summary = settled_df.groupby("Market Bucket", as_index=False)["PNL"].sum().sort_values("PNL", ascending=False)
+    fig = px.bar(summary, x="Market Bucket", y="PNL", title="Profit / Loss by Market Type")
+    fig.update_traces(marker_color="#D1495B")
+    fig.update_xaxes(tickangle=-30)
+    return style_figure(fig)
+
+
+def plot_hit_rate_by_confidence(settled_df):
+    graded = settled_df[settled_df["Result"].isin(["Win", "Loss"])].copy()
+    if graded.empty:
+        return None
+    graded["Win Flag"] = graded["Result"].eq("Win").astype(int) * 100
+    summary = graded.groupby("Confidence", as_index=False)["Win Flag"].mean()
+    order = ["Elite", "High", "Medium", "Low"]
+    summary["Confidence"] = pd.Categorical(summary["Confidence"], categories=order, ordered=True)
+    summary = summary.sort_values("Confidence")
+    fig = px.bar(summary, x="Confidence", y="Win Flag", title="Hit Rate by Confidence")
+    fig.update_traces(marker_color="#FFFFFF")
+    fig.update_yaxes(title="Win Rate %")
+    return style_figure(fig)
+
+
+def plot_exposure_by_sport(final_bets):
+    if final_bets.empty:
+        return None
+    summary = final_bets.groupby("Sport", as_index=False)["Stake To Bet"].sum().sort_values("Stake To Bet", ascending=False)
+    fig = px.bar(summary, x="Sport", y="Stake To Bet", title="Open Suggested Exposure by Sport")
+    fig.update_traces(marker_color="#F4B6C2")
+    return style_figure(fig)
+
+
+def plot_exposure_by_book(final_bets):
+    if final_bets.empty:
+        return None
+    summary = final_bets.groupby("Sportsbook", as_index=False)["Stake To Bet"].sum().sort_values("Stake To Bet", ascending=False)
+    fig = px.pie(summary, names="Sportsbook", values="Stake To Bet", title="Open Suggested Exposure by Sportsbook", hole=0.45)
+    fig.update_traces(textinfo="label+percent", marker=dict(colors=["#9E1B32", "#D1495B", "#FFFFFF", "#F4B6C2"]))
+    return style_figure(fig)
+
+
+def plot_edge_distribution(current_rows):
+    bets = current_rows[current_rows["Final Status"] == "Bet"].copy()
+    if bets.empty:
+        return None
+    fig = px.histogram(bets, x="Edge %", nbins=15, title="Edge Distribution of Final Bets")
+    fig.update_traces(marker_color="#9E1B32")
+    return style_figure(fig)
+
+
+def plot_score_vs_pnl(settled_df):
+    graded = settled_df[settled_df["Result"].isin(["Win", "Loss"])].copy()
+    if graded.empty:
+        return None
+    fig = px.scatter(
+        graded,
+        x="Bet Score",
+        y="PNL",
+        color="Result",
+        hover_data=["Event", "Pick", "Sportsbook", "Confidence"],
+        title="Bet Score vs Result P/L",
+        color_discrete_map={"Win": "#FFFFFF", "Loss": "#D1495B"},
+    )
+    return style_figure(fig)
+
+
+def plot_line_gap_leaderboard(compare_df):
+    if compare_df.empty:
+        return None
+    top = compare_df.head(12).copy()
+    top["Label"] = top["Pick"] + " | " + top["Best Sportsbook"].fillna("")
+    fig = px.bar(top, x="Line Gap %", y="Label", orientation="h", title="Top Line-Gap Shopping Opportunities")
+    fig.update_traces(marker_color="#9E1B32")
+    fig.update_yaxes(categoryorder="total ascending")
+    return style_figure(fig, height=450)
+
+
+def plot_line_heatmap(all_rows, compare_df):
+    if all_rows.empty or compare_df.empty:
+        return None
+
+    top_keys = compare_df.head(12)[["Event ID", "Odd ID"]].drop_duplicates()
+    merged = all_rows.merge(top_keys, on=["Event ID", "Odd ID"], how="inner")
+    if merged.empty:
+        return None
+
+    merged = merged.copy()
+    merged["Label"] = merged["Pick"] + " | " + merged["Event"]
+    pivot = merged.pivot_table(index="Label", columns="Sportsbook", values="Implied Prob", aggfunc="first")
+    if pivot.empty:
+        return None
+
+    pivot = pivot.reindex(columns=["DraftKings", "FanDuel", "Bet365", "PrizePicks"], fill_value=None)
+    fig = px.imshow(
+        pivot,
+        aspect="auto",
+        text_auto=".2f",
+        color_continuous_scale=["#FFFFFF", "#F4B6C2", "#D1495B", "#9E1B32"],
+        title="Best-Line Heatmap (Lower Implied Prob = Better Price)",
+    )
+    fig.update_xaxes(side="top")
+    return style_figure(fig, height=500)
+
+
+def plot_observed_clv(settled_or_pending_log):
+    if settled_or_pending_log.empty:
+        return None
+    usable = settled_or_pending_log[settled_or_pending_log["Latest Odds Seen"].astype(str) != ""].copy()
+    if usable.empty:
+        return None
+    summary = usable.groupby("CLV Label", as_index=False)["Observed CLV %"].mean().sort_values("Observed CLV %", ascending=False)
+    fig = px.bar(summary, x="CLV Label", y="Observed CLV %", title="Observed CLV by Market Position")
+    fig.update_traces(marker_color="#FFFFFF")
+    return style_figure(fig)
+
+
+# -----------------------------
+# STYLING
 # -----------------------------
 st.markdown(
     """
@@ -723,15 +1349,15 @@ st.markdown(
     }
 
     .main-title {
-        font-size: 2.9rem;
+        font-size: 3.0rem;
         font-weight: 900;
         color: #FFFFFF;
-        margin-bottom: 0.15rem;
-        letter-spacing: 0.5px;
+        margin-bottom: 0.1rem;
+        letter-spacing: 0.6px;
     }
 
     .sub-title {
-        font-size: 1rem;
+        font-size: 1.02rem;
         color: #F0EAEA;
         margin-bottom: 1.0rem;
     }
@@ -753,7 +1379,7 @@ st.markdown(
     .hero-box {
         background: linear-gradient(135deg, rgba(91,16,33,0.96) 0%, rgba(158,27,50,0.96) 100%);
         border: 1px solid rgba(255,255,255,0.16);
-        border-radius: 20px;
+        border-radius: 22px;
         padding: 20px 24px;
         margin-bottom: 18px;
         box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
@@ -804,6 +1430,13 @@ st.markdown(
         margin: 14px 0;
     }
 
+    .kpi-note {
+        font-size: 0.82rem;
+        color: #F2DDE2;
+        margin-top: -8px;
+        margin-bottom: 8px;
+    }
+
     .stMetric {
         background: rgba(255,255,255,0.06);
         border: 1px solid rgba(255,255,255,0.08);
@@ -812,13 +1445,15 @@ st.markdown(
     }
 
     div[data-baseweb="select"] > div,
-    div[data-baseweb="base-input"] > div {
+    div[data-baseweb="base-input"] > div,
+    div[data-baseweb="textarea"] > div {
         color: black !important;
         background: #FFFFFF !important;
     }
 
     div[data-baseweb="select"] input,
-    div[data-baseweb="base-input"] input {
+    div[data-baseweb="base-input"] input,
+    div[data-baseweb="textarea"] textarea {
         color: black !important;
     }
 
@@ -836,21 +1471,44 @@ st.markdown(
     .stTabs [aria-selected="true"] {
         background: rgba(255,255,255,0.20) !important;
     }
+
+    .factor-chip {
+        display: inline-block;
+        background: rgba(255,255,255,0.10);
+        border: 1px solid rgba(255,255,255,0.15);
+        border-radius: 999px;
+        padding: 4px 10px;
+        margin: 2px 4px 2px 0;
+        font-size: 0.80rem;
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-
 # -----------------------------
-# SIDEBAR
+# SIDEBAR CONTROLS
 # -----------------------------
 st.sidebar.title("🐘 Crimson Controls")
 
 bankroll = st.sidebar.number_input("Starting Bankroll", min_value=1.0, value=500.0, step=25.0)
 min_bet = st.sidebar.number_input("Minimum Bet", min_value=1.0, value=1.0, step=1.0)
 max_bet = st.sidebar.number_input("Maximum Bet", min_value=1.0, value=10.0, step=1.0)
+
+st.sidebar.markdown("### Exposure Rules")
 max_total_exposure = st.sidebar.number_input("Max Total Exposure", min_value=1.0, value=40.0, step=5.0)
+max_sport_exposure = st.sidebar.number_input("Max Exposure Per Sport", min_value=1.0, value=20.0, step=5.0)
+max_event_exposure = st.sidebar.number_input("Max Exposure Per Event", min_value=1.0, value=10.0, step=1.0)
+max_book_exposure = st.sidebar.number_input("Max Exposure Per Sportsbook", min_value=1.0, value=15.0, step=1.0)
+max_prop_exposure = st.sidebar.number_input("Max Prop Exposure", min_value=1.0, value=12.0, step=1.0)
+
+st.sidebar.markdown("### Logic Thresholds")
+min_books_quoting = st.sidebar.number_input("Minimum Books Quoting", min_value=1, value=2, step=1)
+min_edge_pct = st.sidebar.number_input("Minimum Edge %", min_value=0.0, value=1.0, step=0.5)
+min_score = st.sidebar.number_input("Minimum Bet Score", min_value=0.0, value=3.5, step=0.5)
+min_minutes_to_start = st.sidebar.number_input("Minimum Minutes To Start", min_value=0, value=15, step=5)
+max_bets_per_event = st.sidebar.number_input("Max Bets Per Event", min_value=1, value=2, step=1)
+limit_main_markets_per_event = st.sidebar.toggle("Limit To One Main Market Per Event", value=True)
 
 league_filter = st.sidebar.multiselect(
     "Leagues",
@@ -878,33 +1536,35 @@ confidence_filter = st.sidebar.multiselect(
     default=confidence_options,
 )
 
-only_bets = st.sidebar.toggle("Show final bets only", value=False)
+only_final_bets = st.sidebar.toggle("Show final bets only", value=False)
 
 if st.sidebar.button("Refresh now"):
     st.cache_data.clear()
     st.rerun()
 
+# -----------------------------
+# HEADER
+# -----------------------------
 st.markdown('<div class="main-title">🐘 Crimson Sports Betting Dashboard</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="sub-title">Best-book comparison, stake sizing, and tracked performance with a Saturday-in-Tuscaloosa feel.</div>',
+    '<div class="sub-title">KPI-first betting terminal with line shopping, exposure control, charts, and tracked performance.</div>',
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="theme-banner"><b>New in this version:</b> compare lines across books, best-book detection, and total exposure caps.</div>',
+    '<div class="theme-banner"><b>New in this version:</b> KPI ribbon, chart-first layout, best-line heatmap, exposure caps by sport/event/book, line movement tracking, observed CLV, and correlation controls.</div>',
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="note-box"><b>Tracker note:</b> this version still saves bet history to a local CSV. That is fine for now, but it can be wiped if the app restarts on Streamlit Cloud.</div>',
+    '<div class="note-box"><b>Storage note:</b> bet history and line snapshots are still stored locally in CSV files. That works for now, but Streamlit Cloud can wipe local files on restart, so permanent storage should be the next infrastructure upgrade later.</div>',
     unsafe_allow_html=True,
 )
-
 
 # -----------------------------
-# LIVE HERO SECTION (AUTO REFRESH)
+# LIVE AUTO-REFRESH HERO
 # -----------------------------
 @st.fragment(run_every="15m")
 def render_live_snapshot():
-    live_df, compare_df, error_message = get_live_board(
+    current_rows, compare_rows, error_message = get_live_board(
         leagues=league_filter,
         sportsbooks=book_filter,
         market_buckets=market_bucket_filter,
@@ -912,21 +1572,25 @@ def render_live_snapshot():
         min_bet=min_bet,
         max_bet=max_bet,
         max_total_exposure=max_total_exposure,
-        only_bets=only_bets,
+        max_sport_exposure=max_sport_exposure,
+        max_event_exposure=max_event_exposure,
+        max_book_exposure=max_book_exposure,
+        max_prop_exposure=max_prop_exposure,
+        min_books_quoting=min_books_quoting,
+        min_edge_pct=min_edge_pct,
+        min_score=min_score,
+        min_minutes_to_start=min_minutes_to_start,
+        max_bets_per_event=max_bets_per_event,
+        limit_main_markets_per_event=limit_main_markets_per_event,
+        only_final_bets=only_final_bets,
     )
 
     if error_message:
         st.warning(error_message)
         return
 
-    live_bets = live_df[live_df["Final Status"] == "Bet"].copy()
-    best_row = live_bets.iloc[0] if not live_bets.empty else None
-    best_edge = float(live_bets["Edge %"].max()) if not live_bets.empty else 0.0
-    avg_edge = float(live_bets["Edge %"].mean()) if not live_bets.empty else 0.0
-    avg_score = float(live_bets["Bet Score"].mean()) if not live_bets.empty else 0.0
-    open_risk = float(live_bets["Stake To Bet"].sum()) if not live_bets.empty else 0.0
-    active_bets = int(len(live_bets))
-    strong_shop_count = int((compare_df["Shop Alert"] == "Strong Shop").sum()) if not compare_df.empty else 0
+    final_bets = current_rows[current_rows["Final Status"] == "Bet"].copy()
+    best_row = final_bets.iloc[0] if not final_bets.empty else None
     refresh_time = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
 
     st.markdown('<div class="hero-box">', unsafe_allow_html=True)
@@ -939,9 +1603,9 @@ def render_live_snapshot():
                 f"""
                 **{best_row['Pick']}**  
                 {best_row['Event']} · {best_row['Market']}  
-                Book: **{best_row['Sportsbook']}** · Odds: **{best_row['Odds']}**  
+                Best Book: **{best_row['Sportsbook']}** · Odds: **{best_row['Odds']}**  
                 Edge: **{best_row['Edge %']:.2f}%** · Score: **{best_row['Bet Score']:.2f}** · Confidence: **{best_row['Confidence']}**  
-                Stake To Bet: **${int(best_row['Stake To Bet'])}**  
+                Stake To Bet: **${int(best_row['Stake To Bet'])}** · Trend: **{best_row['Line Trend']}**  
                 Reason: *{best_row['Reason']}*
                 """
             )
@@ -951,30 +1615,16 @@ def render_live_snapshot():
             st.info("No bets qualify right now under the current rules.")
 
     with hero_right:
-        st.markdown('<div class="small-label">Starting Bankroll</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="big-value">${bankroll:,.2f}</div>', unsafe_allow_html=True)
         st.markdown('<div class="small-label">Bet Range</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="big-value">${min_bet:.0f} - ${max_bet:.0f}</div>', unsafe_allow_html=True)
         st.markdown('<div class="small-label">Exposure Cap</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="big-value">${max_total_exposure:,.0f}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="small-label">Refresh Cadence</div>', unsafe_allow_html=True)
+        st.markdown('<div class="big-value">15 min</div>', unsafe_allow_html=True)
         st.markdown('<div class="small-label">Last Refresh</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="big-value" style="font-size:1.0rem;">{refresh_time}</div>', unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
-
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
-    with k1:
-        st.metric("Final Bets", active_bets)
-    with k2:
-        st.metric("Best Edge", f"{best_edge:.2f}%")
-    with k3:
-        st.metric("Average Edge", f"{avg_edge:.2f}%")
-    with k4:
-        st.metric("Average Score", f"{avg_score:.2f}")
-    with k5:
-        st.metric("Open Suggested Risk", f"${open_risk:,.0f}")
-    with k6:
-        st.metric("Strong Shop Alerts", strong_shop_count)
 
 
 render_live_snapshot()
@@ -987,7 +1637,17 @@ current_df, compare_df, live_error = get_live_board(
     min_bet=min_bet,
     max_bet=max_bet,
     max_total_exposure=max_total_exposure,
-    only_bets=only_bets,
+    max_sport_exposure=max_sport_exposure,
+    max_event_exposure=max_event_exposure,
+    max_book_exposure=max_book_exposure,
+    max_prop_exposure=max_prop_exposure,
+    min_books_quoting=min_books_quoting,
+    min_edge_pct=min_edge_pct,
+    min_score=min_score,
+    min_minutes_to_start=min_minutes_to_start,
+    max_bets_per_event=max_bets_per_event,
+    limit_main_markets_per_event=limit_main_markets_per_event,
+    only_final_bets=only_final_bets,
 )
 
 if live_error:
@@ -995,13 +1655,64 @@ if live_error:
     st.info("Add SPORTS_GAME_ODDS_API_KEY in Streamlit Secrets, then click Refresh now.")
     st.stop()
 
-bet_log = load_bet_log()
-pending_df = bet_log[bet_log["Bet Status"] == "Pending"].copy()
-settled_df = bet_log[bet_log["Bet Status"] == "Settled"].copy()
+bet_log = attach_observed_clv(load_bet_log())
+pending_log = bet_log[bet_log["Bet Status"] == "Pending"].copy()
+settled_log = bet_log[bet_log["Bet Status"] == "Settled"].copy()
+final_bets_live = current_df[current_df["Final Status"] == "Bet"].copy()
+pass_bets_live = current_df[current_df["Final Status"] == "Pass"].copy()
 
+# -----------------------------
+# KPI RIBBON
+# -----------------------------
+realized_pnl = float(settled_log["PNL"].sum()) if not settled_log.empty else 0.0
+current_bankroll = float(bankroll) + realized_pnl
+total_settled_stake = float(settled_log["Stake"].sum()) if not settled_log.empty else 0.0
+roi = (realized_pnl / total_settled_stake * 100) if total_settled_stake > 0 else 0.0
+graded = settled_log[settled_log["Result"].isin(["Win", "Loss"])].copy()
+win_rate = (graded["Result"].eq("Win").mean() * 100) if not graded.empty else 0.0
+open_suggested_risk = float(final_bets_live["Stake To Bet"].sum()) if not final_bets_live.empty else 0.0
+open_logged_risk = float(pending_log["Stake"].sum()) if not pending_log.empty else 0.0
+strong_shop_alerts = int((compare_df["Shop Alert"] == "Strong Shop").sum()) if not compare_df.empty else 0
+avg_edge_live = float(final_bets_live["Edge %"].mean()) if not final_bets_live.empty else 0.0
+avg_score_live = float(final_bets_live["Bet Score"].mean()) if not final_bets_live.empty else 0.0
+avg_observed_clv = float(bet_log["Observed CLV %"].mean()) if not bet_log.empty else 0.0
+beat_market_count = int((bet_log["Observed CLV %"] > 0).sum()) if not bet_log.empty else 0
+
+k1, k2, k3, k4 = st.columns(4)
+with k1:
+    st.metric("Current Bankroll", f"${current_bankroll:,.2f}", delta=f"${realized_pnl:,.2f}")
+    st.markdown('<div class="kpi-note">delta = realized P/L</div>', unsafe_allow_html=True)
+with k2:
+    st.metric("ROI", f"{roi:.1f}%", delta=f"Win rate {win_rate:.1f}%")
+    st.markdown('<div class="kpi-note">settled bets only</div>', unsafe_allow_html=True)
+with k3:
+    st.metric("Live Final Bets", int(len(final_bets_live)), delta=f"Avg score {avg_score_live:.2f}")
+    st.markdown('<div class="kpi-note">ranked after all filters and caps</div>', unsafe_allow_html=True)
+with k4:
+    exposure_delta = f"{(open_suggested_risk / max_total_exposure * 100):.0f}% of cap" if max_total_exposure > 0 else "0% of cap"
+    st.metric("Open Suggested Risk", f"${open_suggested_risk:,.0f}", delta=exposure_delta)
+    st.markdown('<div class="kpi-note">live board exposure, not logged tickets</div>', unsafe_allow_html=True)
+
+k5, k6, k7, k8 = st.columns(4)
+with k5:
+    st.metric("Strong Shop Alerts", strong_shop_alerts, delta=f"Avg edge {avg_edge_live:.2f}%")
+    st.markdown('<div class="kpi-note">bigger line gaps across books</div>', unsafe_allow_html=True)
+with k6:
+    st.metric("Pending Logged Risk", f"${open_logged_risk:,.2f}", delta=f"{len(pending_log)} pending")
+    st.markdown('<div class="kpi-note">from tracked bets only</div>', unsafe_allow_html=True)
+with k7:
+    st.metric("Observed CLV", f"{avg_observed_clv:.2f}%", delta=f"{beat_market_count} beating market")
+    st.markdown('<div class="kpi-note">latest seen line vs logged price</div>', unsafe_allow_html=True)
+with k8:
+    st.metric("Passes / Correlation", int(len(pass_bets_live)), delta="risk controls active")
+    st.markdown('<div class="kpi-note">filtered out by logic or exposure</div>', unsafe_allow_html=True)
+
+# -----------------------------
+# TABS
+# -----------------------------
 tabs = st.tabs(
     [
-        "Home",
+        "Overview",
         "Best Bets",
         "Compare Lines",
         "DraftKings",
@@ -1015,76 +1726,119 @@ tabs = st.tabs(
 )
 
 # -----------------------------
-# HOME
+# OVERVIEW TAB
 # -----------------------------
 with tabs[0]:
-    left, right = st.columns([1.35, 1])
-
-    live_bets = current_df[current_df["Final Status"] == "Bet"].copy().head(5)
-
-    with left:
-        st.markdown('<div class="section-title">Top Final Bets</div>', unsafe_allow_html=True)
-        if live_bets.empty:
-            st.warning("No final bets available right now.")
+    row1_left, row1_right = st.columns(2)
+    with row1_left:
+        fig = plot_bankroll_curve(settled_log, bankroll)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            for _, row in live_bets.iterrows():
-                link_html = f'<br><a href="{row["Link"]}" target="_blank">Open bet page</a>' if row["Link"] else ""
-                st.markdown(
-                    f"""
-                    <div class="best-bet">
-                        <b>{row['Pick']}</b><br>
-                        {row['Event']} · {row['Market']}<br>
-                        Book: <b>{row['Sportsbook']}</b> · Odds: <b>{row['Odds']}</b><br>
-                        Edge: <b>{row['Edge %']:.2f}%</b> · Score: <b>{row['Bet Score']:.2f}</b> · Confidence: <b>{row['Confidence']}</b><br>
-                        Stake To Bet: <b>${int(row['Stake To Bet'])}</b> · Exposure: <b>{row['Exposure Status']}</b><br>
-                        Reason: <i>{row['Reason']}</i>
-                        {link_html}
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
+            st.info("Settle a few bets to unlock the bankroll curve.")
+    with row1_right:
+        fig = plot_profit_by_sportsbook(settled_log)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No sportsbook profit chart yet.")
+
+    row2_left, row2_right = st.columns(2)
+    with row2_left:
+        fig = plot_exposure_by_sport(final_bets_live)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No current live exposure to chart.")
+    with row2_right:
+        fig = plot_hit_rate_by_confidence(settled_log)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Need wins/losses to chart hit rate by confidence.")
+
+    row3_left, row3_right = st.columns(2)
+    with row3_left:
+        fig = plot_edge_distribution(current_df)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No final bets available for edge distribution.")
+    with row3_right:
+        fig = plot_line_gap_leaderboard(compare_df)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No comparison rows available for line-gap leaderboard.")
+
+    row4_left, row4_right = st.columns(2)
+    with row4_left:
+        fig = plot_line_heatmap(current_df, compare_df)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No heatmap available yet.")
+    with row4_right:
+        fig = plot_exposure_by_book(final_bets_live)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No sportsbook exposure chart available.")
+
+    st.markdown('<div class="section-title">Top Final Bets</div>', unsafe_allow_html=True)
+    if final_bets_live.empty:
+        st.warning("No final bets available right now.")
+    else:
+        top_cards = final_bets_live.head(5).copy()
+        for _, row in top_cards.iterrows():
+            link_html = f'<br><a href="{row["Link"]}" target="_blank">Open bet page</a>' if row["Link"] else ""
+            st.markdown(
+                f"""
+                <div class="best-bet">
+                    <b>{row['Pick']}</b><br>
+                    {row['Event']} · {row['Market']}<br>
+                    Best Book: <b>{row['Sportsbook']}</b> · Odds: <b>{row['Odds']}</b><br>
+                    Edge: <b>{row['Edge %']:.2f}%</b> · Score: <b>{row['Bet Score']:.2f}</b> · Confidence: <b>{row['Confidence']}</b><br>
+                    Stake To Bet: <b>${int(row['Stake To Bet'])}</b> · Trend: <b>{row['Line Trend']}</b> · Exposure: <b>{row['Exposure Status']}</b><br>
+                    Reason: <i>{row['Reason']}</i>
+                    {link_html}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.markdown('<div class="section-title">Why the Top Bets Rank Here</div>', unsafe_allow_html=True)
+    explain_rows = final_bets_live.head(3).copy()
+    if explain_rows.empty:
+        st.info("No final bets available for factor breakdown.")
+    else:
+        for i, row in explain_rows.iterrows():
+            with st.expander(f"{row['Pick']} | {row['Sportsbook']} {row['Odds']} | Score {row['Bet Score']:.2f}", expanded=(i == explain_rows.index[0])):
+                chip_html = (
+                    f'<span class="factor-chip">Edge {row["Edge %"]:.2f}%</span>'
+                    f'<span class="factor-chip">Line Gap {row["Best Line Gap %"]:.2f}%</span>'
+                    f'<span class="factor-chip">Books {int(row["Books Quoting"])}</span>'
+                    f'<span class="factor-chip">Trend {row["Line Trend"]}</span>'
+                    f'<span class="factor-chip">Move {row["Line Move %"]:.2f}%</span>'
+                    f'<span class="factor-chip">Stake ${int(row["Stake To Bet"])}</span>'
                 )
-
-    with right:
-        st.markdown('<div class="section-title">Shopping Snapshot</div>', unsafe_allow_html=True)
-        strong_shop = int((compare_df["Shop Alert"] == "Strong Shop").sum()) if not compare_df.empty else 0
-        good_shop = int((compare_df["Shop Alert"] == "Good Shop").sum()) if not compare_df.empty else 0
-        open_risk = pending_df["Stake"].sum() if not pending_df.empty else 0.0
-        settled_profit = settled_df["PNL"].sum() if not settled_df.empty else 0.0
-        current_bankroll = bankroll + settled_profit
-
-        st.markdown(
-            f"""
-            <div class="card">
-            Strong Shop Alerts: <b>{strong_shop}</b><br>
-            Good Shop Alerts: <b>{good_shop}</b><br>
-            Pending Bets: <b>{len(pending_df)}</b><br>
-            Open Logged Risk: <b>${open_risk:,.2f}</b><br>
-            Realized P/L: <b>${settled_profit:,.2f}</b><br>
-            Current Bankroll: <b>${current_bankroll:,.2f}</b>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        st.markdown(
-            """
-            <div class="card">
-            <b>What changed in this version:</b><br>
-            • Compare the same outcome across books<br>
-            • See the best current book for that bet<br>
-            • Limit total suggested risk with an exposure cap<br>
-            • Keep full bet tracking and results tabs
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+                st.markdown(chip_html, unsafe_allow_html=True)
+                st.write(f"**Core reasoning:** {row['Reason']}")
+                st.write(f"**Factor math:** {build_factor_text(row)}")
+                if row["Allocation Notes"]:
+                    st.write(f"**Allocation note:** {row['Allocation Notes']}")
+                if row["Correlation Flag"]:
+                    st.write(f"**Correlation flag:** {row['Correlation Flag']}")
+                if row["Opening Odds"]:
+                    st.write(
+                        f"**Line history:** opened at {row['Opening Odds']} and is now {row['Odds']} ({row['Line Trend']}, {row['Line Move %']:.2f}% implied-probability move)."
+                    )
 
 # -----------------------------
-# BEST BETS
+# BEST BETS TAB
 # -----------------------------
 with tabs[1]:
     st.markdown('<div class="section-title">Best Bets Board</div>', unsafe_allow_html=True)
-
     display_df = current_df.copy()
     display_df = display_df[
         [
@@ -1095,6 +1849,9 @@ with tabs[1]:
             "Pick",
             "Sportsbook",
             "Odds",
+            "Opening Odds",
+            "Line Trend",
+            "Line Move %",
             "Implied Prob",
             "Model Prob",
             "Edge %",
@@ -1105,17 +1862,18 @@ with tabs[1]:
             "Recommended Bet",
             "Stake To Bet",
             "Exposure Status",
-            "Final Status",
+            "Display Status",
+            "Allocation Notes",
             "Reason",
             "Link",
         ]
     ]
-
     st.dataframe(
         display_df,
         use_container_width=True,
         hide_index=True,
         column_config={
+            "Line Move %": st.column_config.NumberColumn(format="%.2f%%"),
             "Implied Prob": st.column_config.NumberColumn(format="%.2f%%"),
             "Model Prob": st.column_config.NumberColumn(format="%.2f%%"),
             "Edge %": st.column_config.NumberColumn(format="%.2f%%"),
@@ -1128,245 +1886,214 @@ with tabs[1]:
     )
 
 # -----------------------------
-# COMPARE LINES
+# COMPARE LINES TAB
 # -----------------------------
 with tabs[2]:
     st.markdown('<div class="section-title">Compare Lines / Best Book</div>', unsafe_allow_html=True)
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
-        strong_shop = int((compare_df["Shop Alert"] == "Strong Shop").sum()) if not compare_df.empty else 0
-        st.metric("Strong Shop Alerts", strong_shop)
+        st.metric("Strong Shop Alerts", strong_shop_alerts)
     with c2:
         good_shop = int((compare_df["Shop Alert"] == "Good Shop").sum()) if not compare_df.empty else 0
         st.metric("Good Shop Alerts", good_shop)
     with c3:
         final_compare_bets = int((compare_df["Final Status"] == "Bet").sum()) if not compare_df.empty else 0
         st.metric("Best-Book Final Bets", final_compare_bets)
+    with c4:
+        avg_gap = float(compare_df["Line Gap %"].mean()) if not compare_df.empty else 0.0
+        st.metric("Average Line Gap", f"{avg_gap:.2f}%")
 
-    st.markdown(
-        """
-        <div class="card">
-        This screen groups the same exact outcome across books so you can see where the best number sits.
-        Lower implied probability means a better price for you.
-        </div>
-        """,
-        unsafe_allow_html=True,
+    heatmap_fig = plot_line_heatmap(current_df, compare_df)
+    if heatmap_fig:
+        st.plotly_chart(heatmap_fig, use_container_width=True)
+
+    st.dataframe(
+        compare_df[
+            [
+                "Sport",
+                "Event",
+                "Market Bucket",
+                "Market",
+                "Pick",
+                "DraftKings",
+                "FanDuel",
+                "Bet365",
+                "PrizePicks",
+                "Best Sportsbook",
+                "Best Odds",
+                "Opening Odds",
+                "Best Line Trend",
+                "Best Line Move %",
+                "Books Quoting",
+                "Line Gap %",
+                "Shop Alert",
+                "Best Bet Score",
+                "Best Confidence",
+                "Stake To Bet",
+                "Exposure Status",
+                "Final Status",
+                "Allocation Notes",
+                "Best Reason",
+                "Best Link",
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Best Line Move %": st.column_config.NumberColumn(format="%.2f%%"),
+            "Line Gap %": st.column_config.NumberColumn(format="%.2f%%"),
+            "Best Bet Score": st.column_config.NumberColumn(format="%.2f"),
+            "Stake To Bet": st.column_config.NumberColumn(format="$%d"),
+            "Best Link": st.column_config.LinkColumn("Open"),
+        },
     )
 
-    if compare_df.empty:
-        st.info("No comparison rows available for the current filters.")
-    else:
-        st.dataframe(
-            compare_df[
-                [
-                    "Sport",
-                    "Event",
-                    "Market Bucket",
-                    "Market",
-                    "Pick",
-                    "DraftKings",
-                    "FanDuel",
-                    "Bet365",
-                    "PrizePicks",
-                    "Best Sportsbook",
-                    "Best Odds",
-                    "Books_Quoting",
-                    "Line Gap %",
-                    "Shop Alert",
-                    "Best Bet Score",
-                    "Best Confidence",
-                    "Stake To Bet",
-                    "Exposure Status",
-                    "Final Status",
-                    "Best Reason",
-                    "Best Link",
-                ]
-            ],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Line Gap %": st.column_config.NumberColumn(format="%.2f%%"),
-                "Best Bet Score": st.column_config.NumberColumn(format="%.2f"),
-                "Stake To Bet": st.column_config.NumberColumn(format="$%d"),
-                "Best Link": st.column_config.LinkColumn("Open"),
-            },
-        )
-
 # -----------------------------
-# SPORTSBOOK TABS
+# BOOK TABS
 # -----------------------------
-def sportsbook_tab(book_name):
+def render_book_tab(book_name):
     book_df = current_df[current_df["Sportsbook"] == book_name].copy()
-    bet_df = book_df[book_df["Final Status"] == "Bet"].copy()
-    avg_edge_book = float(bet_df["Edge %"].mean()) if not bet_df.empty else 0.0
-    avg_score_book = float(bet_df["Bet Score"].mean()) if not bet_df.empty else 0.0
-    max_stake_book = int(bet_df["Stake To Bet"].max()) if not bet_df.empty else 0
+    book_final = book_df[book_df["Final Status"] == "Bet"].copy()
 
     st.markdown(f'<div class="section-title">{book_name} Opportunities</div>', unsafe_allow_html=True)
 
-    a1, a2 = st.columns([1.2, 1])
-
-    with a1:
-        st.markdown(
-            f"""
-            <div class="card">
-            <b>{book_name}</b><br>
-            This tab shows only the rows from {book_name}, after applying the same scoring and exposure-cap rules.
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with a2:
-        st.markdown(
-            f"""
-            <div class="card">
-            Final Bets: <b>{len(bet_df)}</b><br>
-            Avg Edge: <b>{avg_edge_book:.2f}%</b><br>
-            Avg Score: <b>{avg_score_book:.2f}</b><br>
-            Max Stake To Bet: <b>${max_stake_book}</b>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    bx1, bx2, bx3 = st.columns(3)
+    with bx1:
+        st.metric("Final Bets", int(len(book_final)))
+    with bx2:
+        avg_edge_book = float(book_final["Edge %"].mean()) if not book_final.empty else 0.0
+        st.metric("Average Edge", f"{avg_edge_book:.2f}%")
+    with bx3:
+        open_book_risk = float(book_final["Stake To Bet"].sum()) if not book_final.empty else 0.0
+        st.metric("Open Suggested Risk", f"${open_book_risk:,.0f}")
 
     if book_df.empty:
         st.warning(f"No rows currently available for {book_name}.")
         return
 
-    book_df = book_df[
-        [
-            "Sport",
-            "Event",
-            "Market Bucket",
-            "Market",
-            "Pick",
-            "Odds",
-            "Edge %",
-            "Bet Score",
-            "Confidence",
-            "Recommended Bet",
-            "Stake To Bet",
-            "Exposure Status",
-            "Final Status",
-            "Reason",
-            "Link",
-        ]
-    ]
-
     st.dataframe(
-        book_df,
+        book_df[
+            [
+                "Sport",
+                "Event",
+                "Market Bucket",
+                "Market",
+                "Pick",
+                "Odds",
+                "Opening Odds",
+                "Line Trend",
+                "Line Move %",
+                "Edge %",
+                "Bet Score",
+                "Confidence",
+                "Stake To Bet",
+                "Exposure Status",
+                "Display Status",
+                "Reason",
+                "Link",
+            ]
+        ],
         use_container_width=True,
         hide_index=True,
         column_config={
+            "Line Move %": st.column_config.NumberColumn(format="%.2f%%"),
             "Edge %": st.column_config.NumberColumn(format="%.2f%%"),
             "Bet Score": st.column_config.NumberColumn(format="%.2f"),
-            "Recommended Bet": st.column_config.NumberColumn(format="$%d"),
             "Stake To Bet": st.column_config.NumberColumn(format="$%d"),
             "Link": st.column_config.LinkColumn("Open"),
         },
     )
 
-
 with tabs[3]:
-    sportsbook_tab("DraftKings")
+    render_book_tab("DraftKings")
 
 with tabs[4]:
-    sportsbook_tab("FanDuel")
+    render_book_tab("FanDuel")
 
 with tabs[5]:
-    sportsbook_tab("Bet365")
+    render_book_tab("Bet365")
 
 with tabs[6]:
-    sportsbook_tab("PrizePicks")
+    render_book_tab("PrizePicks")
 
 # -----------------------------
-# TRACKER
+# TRACKER TAB
 # -----------------------------
 with tabs[7]:
     st.markdown('<div class="section-title">Bet Tracker</div>', unsafe_allow_html=True)
 
-    col_log, col_settle = st.columns(2)
+    log_col, settle_col = st.columns(2)
 
-    with col_log:
+    with log_col:
         st.markdown(
             """
             <div class="card">
             <b>Log Final Bet</b><br>
-            Pick one of the current final bets and save it to your tracked history.
+            Only the fully approved final bets appear here, after shopping and exposure rules are applied.
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        log_candidates = current_df[current_df["Final Status"] == "Bet"].copy()
-
+        log_candidates = final_bets_live.copy()
         if log_candidates.empty:
             st.warning("No final bets available to log.")
         else:
             log_candidates["Log Label"] = log_candidates.apply(
-                lambda row: f"{row['Event']} | {row['Pick']} | {row['Sportsbook']} {row['Odds']} | Score {row['Bet Score']:.2f} | Stake ${int(row['Stake To Bet'])}",
+                lambda row: f"{row['Event']} | {row['Pick']} | {row['Sportsbook']} {row['Odds']} | Stake ${int(row['Stake To Bet'])} | Score {row['Bet Score']:.2f}",
                 axis=1,
             )
 
             with st.form("log_bet_form"):
-                selected_log_label = st.selectbox(
-                    "Choose a final bet",
-                    options=log_candidates["Log Label"].tolist(),
-                )
+                selected_log_label = st.selectbox("Choose a final bet", options=log_candidates["Log Label"].tolist())
                 submitted_log = st.form_submit_button("Log Selected Bet")
-
                 if submitted_log:
-                    selected_row = log_candidates.loc[
-                        log_candidates["Log Label"] == selected_log_label
-                    ].iloc[0]
+                    selected_row = log_candidates.loc[log_candidates["Log Label"] == selected_log_label].iloc[0]
                     ok, msg = log_bet_from_row(selected_row)
                     if ok:
                         st.success(msg)
+                        st.rerun()
                     else:
                         st.warning(msg)
 
-    with col_settle:
+    with settle_col:
         st.markdown(
             """
             <div class="card">
             <b>Settle Pending Bet</b><br>
-            Mark a logged bet as Win, Loss, or Push to update results and bankroll.
+            Mark a pending bet as Win, Loss, or Push to update bankroll, ROI, and results charts.
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        pending_df_live = load_bet_log()
-        pending_df_live = pending_df_live[pending_df_live["Bet Status"] == "Pending"].copy()
+        pending_now = attach_observed_clv(load_bet_log())
+        pending_now = pending_now[pending_now["Bet Status"] == "Pending"].copy()
 
-        if pending_df_live.empty:
+        if pending_now.empty:
             st.info("No pending bets to settle.")
         else:
-            pending_df_live["Settle Label"] = pending_df_live.apply(
+            pending_now["Settle Label"] = pending_now.apply(
                 lambda row: f"{row['Bet ID']} | {row['Event']} | {row['Pick']} | {row['Sportsbook']} {row['Odds']} | Stake ${row['Stake']:,.2f}",
                 axis=1,
             )
 
             with st.form("settle_bet_form"):
-                selected_settle_label = st.selectbox(
-                    "Choose a pending bet",
-                    options=pending_df_live["Settle Label"].tolist(),
-                )
+                selected_settle_label = st.selectbox("Choose a pending bet", options=pending_now["Settle Label"].tolist())
                 settle_result = st.radio("Result", ["Win", "Loss", "Push"], horizontal=True)
                 submitted_settle = st.form_submit_button("Settle Bet")
-
                 if submitted_settle:
                     selected_bet_id = selected_settle_label.split(" | ")[0]
                     ok, msg = settle_bet(selected_bet_id, settle_result)
                     if ok:
                         st.success(msg)
+                        st.rerun()
                     else:
                         st.warning(msg)
 
-    st.markdown('<div class="section-title">Pending Bets</div>', unsafe_allow_html=True)
-    pending_view = load_bet_log()
+    st.markdown('<div class="section-title">Pending Bet Log</div>', unsafe_allow_html=True)
+    pending_view = attach_observed_clv(load_bet_log())
     pending_view = pending_view[pending_view["Bet Status"] == "Pending"].copy()
 
     if pending_view.empty:
@@ -1385,6 +2112,8 @@ with tabs[7]:
                     "Stake",
                     "Confidence",
                     "Bet Score",
+                    "Observed CLV %",
+                    "CLV Label",
                     "Reason",
                 ]
             ],
@@ -1393,80 +2122,42 @@ with tabs[7]:
             column_config={
                 "Stake": st.column_config.NumberColumn(format="$%.2f"),
                 "Bet Score": st.column_config.NumberColumn(format="%.2f"),
+                "Observed CLV %": st.column_config.NumberColumn(format="%.2f%%"),
             },
         )
 
 # -----------------------------
-# RESULTS
+# RESULTS TAB
 # -----------------------------
 with tabs[8]:
     st.markdown('<div class="section-title">Performance Results</div>', unsafe_allow_html=True)
 
-    results_df = load_bet_log()
-    settled_results = results_df[results_df["Bet Status"] == "Settled"].copy()
-
-    if settled_results.empty:
-        st.info("No settled bets yet. Log and settle a few bets to build the results dashboard.")
+    if settled_log.empty:
+        st.info("No settled bets yet. Log and settle a few bets to unlock the full performance dashboard.")
     else:
-        graded = settled_results[settled_results["Result"].isin(["Win", "Loss"])].copy()
+        results_top1, results_top2 = st.columns(2)
+        with results_top1:
+            fig = plot_profit_by_market(settled_log)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+        with results_top2:
+            fig = plot_score_vs_pnl(settled_log)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
 
-        total_settled = len(settled_results)
-        wins = int((settled_results["Result"] == "Win").sum())
-        losses = int((settled_results["Result"] == "Loss").sum())
-        pushes = int((settled_results["Result"] == "Push").sum())
-        total_profit = float(settled_results["PNL"].sum())
-        total_staked = float(settled_results["Stake"].sum())
-        roi = (total_profit / total_staked * 100) if total_staked > 0 else 0.0
-        win_rate = ((wins / len(graded)) * 100) if len(graded) > 0 else 0.0
-
-        r1, r2, r3, r4, r5 = st.columns(5)
-        with r1:
-            st.metric("Settled Bets", total_settled)
-        with r2:
-            st.metric("Win Rate", f"{win_rate:.1f}%")
-        with r3:
-            st.metric("Profit / Loss", f"${total_profit:,.2f}")
-        with r4:
-            st.metric("ROI", f"{roi:.1f}%")
-        with r5:
-            st.metric("W-L-P", f"{wins}-{losses}-{pushes}")
-
-        chart_col1, chart_col2 = st.columns(2)
-
-        with chart_col1:
-            st.markdown("#### Profit by Sportsbook")
-            profit_by_book = settled_results.groupby("Sportsbook")["PNL"].sum().sort_values(ascending=False)
-            st.bar_chart(profit_by_book)
-
-            st.markdown("#### Profit by Market Type")
-            profit_by_market = settled_results.groupby("Market Bucket")["PNL"].sum().sort_values(ascending=False)
-            st.bar_chart(profit_by_market)
-
-        with chart_col2:
-            st.markdown("#### Running Bankroll")
-            running = settled_results.copy()
-            running["Sort Time"] = pd.to_datetime(running["Settled At"], errors="coerce")
-            running = running.sort_values("Sort Time")
-            running["Running Bankroll"] = bankroll + running["PNL"].cumsum()
-            if not running.empty:
-                line_df = running[["Sort Time", "Running Bankroll"]].dropna()
-                if not line_df.empty:
-                    st.line_chart(line_df.set_index("Sort Time"))
-
-            st.markdown("#### Hit Rate by Confidence")
-            if len(graded) > 0:
-                hit_rate_conf = (
-                    graded.assign(WinFlag=graded["Result"].eq("Win").astype(int))
-                    .groupby("Confidence")["WinFlag"]
-                    .mean()
-                    .mul(100)
-                    .sort_values(ascending=False)
-                )
-                st.bar_chart(hit_rate_conf)
+        results_bottom1, results_bottom2 = st.columns(2)
+        with results_bottom1:
+            fig = plot_hit_rate_by_confidence(settled_log)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+        with results_bottom2:
+            fig = plot_observed_clv(bet_log)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("#### Settled Bet History")
         st.dataframe(
-            settled_results[
+            settled_log[
                 [
                     "Bet ID",
                     "Logged At",
@@ -1481,6 +2172,8 @@ with tabs[8]:
                     "PNL",
                     "Confidence",
                     "Bet Score",
+                    "Observed CLV %",
+                    "CLV Label",
                 ]
             ].sort_values("Settled At", ascending=False),
             use_container_width=True,
@@ -1489,76 +2182,77 @@ with tabs[8]:
                 "Stake": st.column_config.NumberColumn(format="$%.2f"),
                 "PNL": st.column_config.NumberColumn(format="$%.2f"),
                 "Bet Score": st.column_config.NumberColumn(format="%.2f"),
+                "Observed CLV %": st.column_config.NumberColumn(format="%.2f%%"),
             },
         )
 
 # -----------------------------
-# BANKROLL
+# BANKROLL TAB
 # -----------------------------
 with tabs[9]:
-    st.markdown('<div class="section-title">Bankroll Management</div>', unsafe_allow_html=True)
-
-    bank_df = load_bet_log()
-    pending_bank = bank_df[bank_df["Bet Status"] == "Pending"].copy()
-    settled_bank = bank_df[bank_df["Bet Status"] == "Settled"].copy()
-    live_final_bets = current_df[current_df["Final Status"] == "Bet"].copy()
-
-    open_risk_logged = float(pending_bank["Stake"].sum()) if not pending_bank.empty else 0.0
-    open_risk_live = float(live_final_bets["Stake To Bet"].sum()) if not live_final_bets.empty else 0.0
-    realized_pnl = float(settled_bank["PNL"].sum()) if not settled_bank.empty else 0.0
-    current_bankroll = bankroll + realized_pnl
+    st.markdown('<div class="section-title">Bankroll and Risk Controls</div>', unsafe_allow_html=True)
 
     b1, b2, b3, b4 = st.columns(4)
     with b1:
-        st.markdown(
-            f"""
-            <div class="card">
-            <div class="small-label">Starting Bankroll</div>
-            <div class="big-value">${bankroll:,.2f}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        st.metric("Starting Bankroll", f"${bankroll:,.2f}")
     with b2:
-        st.markdown(
-            f"""
-            <div class="card">
-            <div class="small-label">Current Bankroll</div>
-            <div class="big-value">${current_bankroll:,.2f}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        st.metric("Current Bankroll", f"${current_bankroll:,.2f}", delta=f"${realized_pnl:,.2f}")
     with b3:
+        st.metric("Logged Open Risk", f"${open_logged_risk:,.2f}")
+    with b4:
+        st.metric("Live Suggested Risk", f"${open_suggested_risk:,.2f}", delta=f"{(open_suggested_risk / max_total_exposure * 100):.0f}% of cap" if max_total_exposure > 0 else "0% of cap")
+
+    risk_left, risk_right = st.columns(2)
+    with risk_left:
         st.markdown(
             f"""
             <div class="card">
-            <div class="small-label">Logged Open Risk</div>
-            <div class="big-value">${open_risk_logged:,.2f}</div>
+            <b>Live risk policy</b><br>
+            • Bet sizes stay between ${min_bet:.0f} and ${max_bet:.0f}<br>
+            • Total exposure cap: ${max_total_exposure:,.0f}<br>
+            • Per-sport cap: ${max_sport_exposure:,.0f}<br>
+            • Per-event cap: ${max_event_exposure:,.0f}<br>
+            • Per-book cap: ${max_book_exposure:,.0f}<br>
+            • Prop cap: ${max_prop_exposure:,.0f}
             </div>
             """,
             unsafe_allow_html=True,
         )
-    with b4:
+    with risk_right:
         st.markdown(
             f"""
             <div class="card">
-            <div class="small-label">Live Suggested Risk</div>
-            <div class="big-value">${open_risk_live:,.2f}</div>
+            <b>Logic filters</b><br>
+            • Minimum books quoting: {int(min_books_quoting)}<br>
+            • Minimum edge: {min_edge_pct:.1f}%<br>
+            • Minimum score: {min_score:.1f}<br>
+            • Minimum minutes to start: {int(min_minutes_to_start)}<br>
+            • Max bets per event: {int(max_bets_per_event)}<br>
+            • One main market per event: {"On" if limit_main_markets_per_event else "Off"}
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-    st.markdown(
-        f"""
-        <div class="card">
-        <b>Current bankroll rules:</b><br>
-        • Individual suggested stakes still stay between ${min_bet:.0f} and ${max_bet:.0f}<br>
-        • Total live suggested exposure is capped at ${max_total_exposure:,.0f}<br>
-        • Lower-ranked plays can be trimmed or passed once the cap is reached<br>
-        • Logged and settled bets continue to drive realized P/L and bankroll history
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        if not pass_bets_live.empty:
+            st.markdown("#### Why the app passed on some bets")
+            st.dataframe(
+                pass_bets_live[
+                    [
+                        "Event",
+                        "Pick",
+                        "Sportsbook",
+                        "Edge %",
+                        "Bet Score",
+                        "Exposure Status",
+                        "Allocation Notes",
+                        "Correlation Flag",
+                    ]
+                ].head(20),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Edge %": st.column_config.NumberColumn(format="%.2f%%"),
+                    "Bet Score": st.column_config.NumberColumn(format="%.2f"),
+                },
+            )
