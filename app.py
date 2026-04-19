@@ -3180,7 +3180,7 @@ Bankroll tab. Params: <code>addBet</code>, <code>book</code>,
 </div>""",
             unsafe_allow_html=True,
         )
-    # ---- Game-day theme music (#85) - YouTube fight songs ----
+    # ---- Game-day theme music (#85) - YouTube + DB + localStorage ----
     with st.expander("Game-day theme music", expanded=False):
         _DEFAULTS = {
             "Alabama Crimson Tide": (
@@ -3204,20 +3204,52 @@ Bankroll tab. Params: <code>addBet</code>, <code>book</code>,
                 "jfKfPfyJRdk",
             ),
         )
+
+        # Persistence key (per theme)
+        _db_key = f"music_url::{_theme_name}"
+
+        # Bootstrap from query-param (set by localStorage JS below)
+        # so we can hydrate DB the first time after a fresh login.
+        try:
+            _qp = st.query_params
+            _seed = _qp.get("edge_seed_music")
+            if _seed:
+                if not db_get_kv(_db_key):
+                    db_set_kv(_db_key, _seed)
+                try:
+                    del st.query_params["edge_seed_music"]
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Saved URL from DB (per-user via _current_user scope)
+        _saved_url = db_get_kv(_db_key, "") or ""
+
+        def _save_music_url():
+            _v = (st.session_state.get(
+                f"music_input_{_theme_name}", "") or ""
+            ).strip()
+            try:
+                db_set_kv(_db_key, _v)
+            except Exception:
+                pass
+
         st.caption(
             f"Default for this theme: **{_default_label}**. "
-            "Paste any YouTube link below to swap it - it stays put per "
-            "theme until you change it. Click play in the player to start."
+            "Paste any YouTube link below and it sticks - saved to your "
+            "account *and* mirrored to your browser, so it survives "
+            "sign-out, refresh, even closing the tab."
         )
 
-        _key = f"music_url_{_theme_name}"
         _user_url = st.text_input(
             "YouTube URL (optional)",
-            value=st.session_state.get(_key, ""),
+            value=_saved_url,
             key=f"music_input_{_theme_name}",
             placeholder="https://www.youtube.com/watch?v=...",
+            on_change=_save_music_url,
+            help="Press Enter or click away to save.",
         )
-        st.session_state[_key] = _user_url
 
         def _yt_id(url):
             import re as _re
@@ -3241,9 +3273,52 @@ Bankroll tab. Params: <code>addBet</code>, <code>book</code>,
             f"rgba(255,255,255,.08);'></iframe>",
             unsafe_allow_html=True,
         )
+
+        # Status pill so user knows where it's persisted
+        _is_pinned = st.session_state.get("edge_user", "default") != "default"
+        _status = (
+            "Saved to your account + this browser"
+            if _is_pinned and _saved_url
+            else ("Saved to this browser (sign in with PIN to sync "
+                  "across devices)" if _saved_url
+                  else "Using default - paste a URL to save")
+        )
+        st.caption(f":material/save: {_status}")
         st.caption(
             f"[Browse {_default_label} on YouTube]({_search_url}) - "
             "find your favorite version, copy the URL, paste it above."
+        )
+
+        # ---- localStorage mirror + bootstrap ----
+        # 1. On every load: if URL is set, write to localStorage.
+        # 2. If DB has nothing AND localStorage has a saved URL,
+        #    push it back via query param so Python rehydrates the DB.
+        from streamlit.components.v1 import html as _ls_html
+        import json as _json
+        _ls_html(
+            f"""
+<script>
+(function() {{
+  try {{
+    const KEY = "edge_music_url::{_theme_name}";
+    const SAVED = {_json.dumps(_saved_url)};
+    if (SAVED) {{
+      localStorage.setItem(KEY, SAVED);
+    }} else {{
+      const fromLS = localStorage.getItem(KEY);
+      if (fromLS) {{
+        const url = new URL(window.parent.location.href);
+        if (!url.searchParams.has("edge_seed_music")) {{
+          url.searchParams.set("edge_seed_music", fromLS);
+          window.parent.location.replace(url.toString());
+        }}
+      }}
+    }}
+  }} catch(e) {{}}
+}})();
+</script>
+            """,
+            height=0,
         )
     st.markdown("---")
     st.markdown("### Bankroll")
