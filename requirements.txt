@@ -2,3 +2,4 @@ streamlit>=1.36
 requests>=2.32
 psycopg2-binary>=2.9
 openai>=1.40
+plotly>=5.18
