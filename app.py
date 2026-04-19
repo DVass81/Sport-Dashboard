@@ -2027,13 +2027,13 @@ with tabs[0]:
     with row1_left:
         fig = plot_bankroll_curve(settled_log, bankroll)
         if fig:
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="overview_bankroll_curve")
         else:
             st.info("Settle a few bets to unlock the bankroll curve.")
     with row1_right:
         fig = plot_profit_by_sportsbook(settled_log)
         if fig:
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="overview_profit_by_sportsbook")
         else:
             st.info("No sportsbook profit chart yet.")
 
@@ -2041,13 +2041,13 @@ with tabs[0]:
     with row2_left:
         fig = plot_exposure_by_sport(final_bets_live)
         if fig:
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="overview_exposure_by_sport")
         else:
             st.info("No current live exposure to chart.")
     with row2_right:
         fig = plot_hit_rate_by_confidence(settled_log)
         if fig:
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="overview_hit_rate_by_confidence")
         else:
             st.info("Need wins/losses to chart hit rate by confidence.")
 
@@ -2055,13 +2055,13 @@ with tabs[0]:
     with row3_left:
         fig = plot_edge_distribution(current_df)
         if fig:
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="overview_edge_distribution")
         else:
             st.info("No final bets available for edge distribution.")
     with row3_right:
         fig = plot_line_gap_leaderboard(compare_df)
         if fig:
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="overview_line_gap_leaderboard")
         else:
             st.info("No comparison rows available for line-gap leaderboard.")
 
@@ -2069,13 +2069,13 @@ with tabs[0]:
     with row4_left:
         fig = plot_line_heatmap(current_df, compare_df)
         if fig:
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="overview_line_heatmap")
         else:
             st.info("No heatmap available yet.")
     with row4_right:
         fig = plot_exposure_by_book(final_bets_live)
         if fig:
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="overview_exposure_by_book")
         else:
             st.info("No sportsbook exposure chart available.")
 
@@ -2251,7 +2251,7 @@ with tabs[2]:
 
     heatmap_fig = plot_line_heatmap(current_df, compare_df)
     if heatmap_fig:
-        st.plotly_chart(heatmap_fig, use_container_width=True)
+        st.plotly_chart(heatmap_fig, use_container_width=True, key="compare_lines_heatmap")
 
     st.dataframe(
         compare_df[
@@ -2641,21 +2641,21 @@ with tabs[10]:
         with results_top1:
             fig = plot_profit_by_market(settled_log)
             if fig:
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="results_profit_by_market")
         with results_top2:
             fig = plot_score_vs_pnl(settled_log)
             if fig:
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="results_score_vs_pnl")
 
         results_bottom1, results_bottom2 = st.columns(2)
         with results_bottom1:
             fig = plot_hit_rate_by_confidence(settled_log)
             if fig:
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="results_hit_rate_by_confidence")
         with results_bottom2:
             fig = plot_observed_clv(bet_log)
             if fig:
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="results_observed_clv")
 
         st.markdown("#### Settled Bet History")
         st.dataframe(
