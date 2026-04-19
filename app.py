@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from math import prod
 
+import altair as alt
+import pandas as pd
 import requests
 import streamlit as st
 
@@ -26,6 +30,8 @@ SPORTSBOOK_LINKS = [
 ]
 
 SGO_BASE = "https://api.sportsgameodds.com/v2"
+DB_PATH = os.environ.get("EDGE_DB_PATH", "edge_bets.db")
+
 CRIMSON = "#9E1B32"
 BG = "#0B1220"
 PANEL = "#121A2B"
@@ -33,6 +39,77 @@ GREEN = "#22C55E"
 AMBER = "#F59E0B"
 RED = "#EF4444"
 MUTED = "#94A3B8"
+
+TIER_COLORS = {
+    "High confidence":   GREEN,
+    "Medium confidence": AMBER,
+    "Low confidence":    AMBER,
+    "Speculative":       MUTED,
+    "Pass":              RED,
+}
+
+
+def db_conn():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS bets (
+            id TEXT PRIMARY KEY,
+            date TEXT,
+            description TEXT,
+            book TEXT,
+            odds INTEGER,
+            stake REAL,
+            to_win REAL,
+            status TEXT,
+            kind TEXT,
+            legs TEXT,
+            created_at TEXT,
+            settled_at TEXT
+        )"""
+    )
+    conn.commit()
+    return conn
+
+
+def db_load_bets():
+    conn = db_conn()
+    rows = conn.execute(
+        "SELECT * FROM bets ORDER BY created_at ASC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def db_insert_bet(bet):
+    conn = db_conn()
+    conn.execute(
+        """INSERT INTO bets
+        (id, date, description, book, odds, stake, to_win, status, kind, legs,
+         created_at, settled_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            bet["id"], bet["date"], bet["description"], bet["book"],
+            int(bet["odds"]), float(bet["stake"]), float(bet["to_win"]),
+            bet["status"], bet.get("kind", "single"), bet.get("legs"),
+            bet["created_at"], bet.get("settled_at"),
+        ),
+    )
+    conn.commit()
+
+
+def db_settle_bet(bet_id, status):
+    conn = db_conn()
+    conn.execute(
+        "UPDATE bets SET status=?, settled_at=? WHERE id=?",
+        (status, datetime.now(timezone.utc).isoformat(), bet_id),
+    )
+    conn.commit()
+
+
+def db_delete_bet(bet_id):
+    conn = db_conn()
+    conn.execute("DELETE FROM bets WHERE id=?", (bet_id,))
+    conn.commit()
 
 
 def get_secret(name):
@@ -48,6 +125,12 @@ def get_secret(name):
 def american_to_decimal(american):
     a = float(american)
     return 1.0 + (a / 100.0 if a > 0 else 100.0 / abs(a))
+
+
+def decimal_to_american(dec):
+    if dec >= 2.0:
+        return int(round((dec - 1.0) * 100))
+    return int(round(-100.0 / (dec - 1.0)))
 
 
 def format_american(odds):
@@ -76,13 +159,12 @@ def recommend_stake(edge_bps, books_count, min_bet, max_bet):
 
 
 def kpi(label, value, color="#F8FAFC"):
-    html = (
+    return (
         "<div class='kpi'>"
         f"<div class='label'>{label}</div>"
         f"<div class='value' style='color:{color}'>{value}</div>"
         "</div>"
     )
-    return html
 
 
 @dataclass
@@ -281,10 +363,7 @@ def parse_event(ev, league, books_filter):
         event_id=ev.get("eventID") or ev.get("id") or "",
         league=league,
         start=ev.get("status", {}).get("startsAt") or ev.get("startsAt") or "",
-        home=home,
-        away=away,
-        markets=markets,
-        player_props=props,
+        home=home, away=away, markets=markets, player_props=props,
     )
 
 
@@ -442,7 +521,7 @@ with st.sidebar:
     bankroll = st.number_input("Bankroll ($)", min_value=10.0, value=500.0, step=10.0)
     min_bet = st.number_input("Min bet ($)", min_value=1.0, value=1.0, step=1.0)
     max_bet = st.number_input(
-        "Max bet ($)", min_value=min_bet, value=max(10.0, min_bet), step=1.0
+        "Max bet ($)", min_value=min_bet, value=max(10.0, min_bet), step=1.0,
     )
     daily_cap_pct = st.slider("Daily exposure cap (% of bankroll)", 5, 100, 20)
     st.caption("Sizing: $1 speculative -> $10 high-confidence. 'Pass' when no edge.")
@@ -457,8 +536,8 @@ with st.sidebar:
 books_filter = set(book_choice) if book_choice else TARGET_BOOKS
 daily_cap = bankroll * daily_cap_pct / 100.0
 
-tab_picks, tab_props, tab_board, tab_bank = st.tabs(
-    ["Suggested Picks", "PrizePicks Picks", "Odds Board", "Bankroll"]
+tab_picks, tab_props, tab_parlay, tab_board, tab_bank = st.tabs(
+    ["Suggested Picks", "PrizePicks Picks", "Parlay Builder", "Odds Board", "Bankroll"]
 )
 
 with tab_picks:
@@ -485,6 +564,40 @@ with tab_picks:
     )
     kc[3].markdown(kpi("Top edge", format_bps(top_edge)), unsafe_allow_html=True)
     st.markdown("&nbsp;", unsafe_allow_html=True)
+
+    if sized:
+        tier_counts = {}
+        for _, _, tier, _ in sized:
+            tier_counts[tier] = tier_counts.get(tier, 0) + 1
+        donut_df = pd.DataFrame([
+            {"Tier": t, "Count": c} for t, c in tier_counts.items()
+        ])
+        order = ["High confidence", "Medium confidence", "Low confidence",
+                 "Speculative", "Pass"]
+        donut = (
+            alt.Chart(donut_df)
+            .mark_arc(innerRadius=60, outerRadius=110, stroke=BG, strokeWidth=2)
+            .encode(
+                theta=alt.Theta("Count:Q"),
+                color=alt.Color(
+                    "Tier:N",
+                    scale=alt.Scale(
+                        domain=order,
+                        range=[GREEN, AMBER, "#D97706", MUTED, RED],
+                    ),
+                    legend=alt.Legend(title="Confidence", labelColor="#E2E8F0",
+                                      titleColor="#F8FAFC"),
+                ),
+                tooltip=["Tier", "Count"],
+            )
+            .properties(height=240, background=PANEL, title=alt.TitleParams(
+                "Confidence breakdown", color="#F8FAFC", anchor="start",
+            ))
+        )
+        ch_col, sp_col = st.columns([1, 2])
+        ch_col.altair_chart(donut, use_container_width=True)
+        with sp_col:
+            st.markdown("&nbsp;", unsafe_allow_html=True)
 
     if not rows:
         st.info("No bets to suggest right now. Check that your API key is set.")
@@ -552,6 +665,91 @@ with tab_props:
             )
             st.markdown(card, unsafe_allow_html=True)
 
+with tab_parlay:
+    st.subheader("Parlay Builder")
+    st.caption(
+        "Combine 2+ picks into a parlay. Combined odds, payout, and the "
+        "implied break-even win rate are calculated from the best line per leg."
+    )
+    pool = all_picks(books_filter, kind="team")
+    if not pool:
+        st.info("No picks available to build a parlay.")
+    else:
+        labels = [
+            f"{r['matchup']} - {r['market']}: {r['pick']} "
+            f"({format_american(r['price'])} @ {r['book']}) "
+            f"[{format_bps(r['edge_bps'])}]"
+            for r in pool
+        ]
+        chosen = st.multiselect(
+            "Select 2 or more legs",
+            options=list(range(len(labels))),
+            format_func=lambda i: labels[i],
+        )
+        stake_p = st.number_input(
+            "Parlay stake ($)", min_value=1.0,
+            value=float(min_bet), step=1.0, key="parlay_stake",
+        )
+        legs = [pool[i] for i in chosen]
+        if len(legs) >= 2:
+            decimals = [american_to_decimal(l["price"]) for l in legs]
+            combined_dec = prod(decimals)
+            combined_am = decimal_to_american(combined_dec)
+            payout = stake_p * combined_dec
+            profit = payout - stake_p
+            implied = 1.0 / combined_dec
+            avg_edge = sum(l["edge_bps"] for l in legs) / len(legs)
+
+            cols = st.columns(5)
+            cols[0].markdown(kpi("Legs", str(len(legs))), unsafe_allow_html=True)
+            cols[1].markdown(
+                kpi("Combined odds", format_american(combined_am)),
+                unsafe_allow_html=True,
+            )
+            cols[2].markdown(
+                kpi("Payout", f"${payout:,.2f}"), unsafe_allow_html=True,
+            )
+            cols[3].markdown(
+                kpi("Profit", f"${profit:,.2f}", color=GREEN),
+                unsafe_allow_html=True,
+            )
+            cols[4].markdown(
+                kpi("Break-even win rate", f"{implied*100:,.1f}%"),
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                f"Average leg edge: {format_bps(avg_edge)}. "
+                "Note: parlays multiply book edge against you, so the real "
+                "edge is usually less than the average shown."
+            )
+
+            if st.button("Log this parlay", type="primary"):
+                desc = " + ".join(
+                    f"{l['matchup'][:18]} {l['pick']}" for l in legs
+                )
+                bet = {
+                    "id": str(time.time()),
+                    "date": datetime.now(timezone.utc).date().isoformat(),
+                    "description": f"Parlay: {desc}",
+                    "book": ", ".join({l["book"] for l in legs}),
+                    "odds": combined_am,
+                    "stake": stake_p,
+                    "to_win": profit,
+                    "status": "open",
+                    "kind": "parlay",
+                    "legs": "; ".join(
+                        f"{l['matchup']} | {l['market']} | {l['pick']} | "
+                        f"{format_american(l['price'])} @ {l['book']}"
+                        for l in legs
+                    ),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+                db_insert_bet(bet)
+                st.success("Parlay logged. See the Bankroll tab.")
+                st.rerun()
+        elif chosen:
+            st.info("Select at least 2 legs to build a parlay.")
+
 with tab_board:
     league_id = st.selectbox("League", [lg["id"] for lg in LEAGUES], index=0)
     events, warn = get_board(league_id, books_filter)
@@ -600,76 +798,141 @@ with tab_board:
                 st.markdown(html, unsafe_allow_html=True)
 
 with tab_bank:
-    if "bets" not in st.session_state:
-        st.session_state.bets = []
+    bets = db_load_bets()
 
     today = datetime.now(timezone.utc).date().isoformat()
     today_open = [
-        b for b in st.session_state.bets
-        if b["status"] == "open" and b["date"] == today
+        b for b in bets if b["status"] == "open" and b["date"] == today
     ]
     today_exposure = sum(b["stake"] for b in today_open)
 
-    c = st.columns(4)
-    c[0].markdown(kpi("Bankroll", f"${bankroll:,.2f}"), unsafe_allow_html=True)
-    c[1].markdown(kpi("Daily cap", f"${daily_cap:,.2f}"), unsafe_allow_html=True)
+    settled = [b for b in bets if b["status"] != "open"]
+    pnl = sum(
+        b["to_win"] if b["status"] == "won" else -b["stake"]
+        for b in settled
+    )
+    equity = bankroll + pnl
+    pnl_color = GREEN if pnl >= 0 else RED
+
+    c = st.columns(5)
+    c[0].markdown(
+        kpi("Starting bankroll", f"${bankroll:,.2f}"), unsafe_allow_html=True,
+    )
+    c[1].markdown(
+        kpi("Current equity", f"${equity:,.2f}"), unsafe_allow_html=True,
+    )
     c[2].markdown(
+        kpi("Settled P&L", f"${pnl:,.2f}", color=pnl_color),
+        unsafe_allow_html=True,
+    )
+    c[3].markdown(
         kpi("Today exposure", f"${today_exposure:,.2f}"),
         unsafe_allow_html=True,
     )
     remaining = max(daily_cap - today_exposure, 0)
-    c[3].markdown(
-        kpi("Remaining today", f"${remaining:,.2f}"),
-        unsafe_allow_html=True,
+    c[4].markdown(
+        kpi("Remaining today", f"${remaining:,.2f}"), unsafe_allow_html=True,
     )
     st.markdown("&nbsp;", unsafe_allow_html=True)
 
-    st.subheader("Log a bet")
+    if settled:
+        sorted_settled = sorted(
+            settled,
+            key=lambda b: b.get("settled_at") or b.get("created_at") or "",
+        )
+        running = bankroll
+        points = [{"Time": "Start", "Equity": bankroll, "Idx": 0}]
+        for i, b in enumerate(sorted_settled, start=1):
+            delta = b["to_win"] if b["status"] == "won" else -b["stake"]
+            running += delta
+            ts = b.get("settled_at") or b.get("created_at") or ""
+            points.append({"Time": ts, "Equity": running, "Idx": i})
+        eq_df = pd.DataFrame(points)
+        line_color = GREEN if running >= bankroll else RED
+        eq_chart = (
+            alt.Chart(eq_df)
+            .mark_line(point=True, strokeWidth=3, color=line_color)
+            .encode(
+                x=alt.X("Idx:Q", title="Settled bet #",
+                        axis=alt.Axis(labelColor="#94A3B8", titleColor="#E2E8F0")),
+                y=alt.Y("Equity:Q", title="Equity ($)",
+                        scale=alt.Scale(zero=False),
+                        axis=alt.Axis(labelColor="#94A3B8", titleColor="#E2E8F0",
+                                      format="$,.0f")),
+                tooltip=["Idx", "Time", alt.Tooltip("Equity:Q", format="$,.2f")],
+            )
+            .properties(height=260, background=PANEL, title=alt.TitleParams(
+                "Bankroll equity curve", color="#F8FAFC", anchor="start",
+            ))
+        )
+        st.altair_chart(eq_chart, use_container_width=True)
+    else:
+        st.caption("Settle some bets to see your equity curve.")
+
+    st.subheader("Log a single bet")
     with st.form("log_bet", clear_on_submit=True):
-        f = st.columns([2, 2, 1, 1])
+        f = st.columns([2, 2, 1, 1, 1])
         desc = f[0].text_input("Description", placeholder="e.g. Lakers ML")
         book = f[1].text_input("Book", placeholder="draftkings / fanduel / bet365")
         odds = f[2].number_input("American odds", value=-110, step=5)
-        stake = f[3].number_input("Stake ($)", min_value=0.0, value=min_bet, step=1.0)
-        submit = f[3].form_submit_button("Add bet", type="primary")
+        stake = f[3].number_input(
+            "Stake ($)", min_value=0.0, value=min_bet, step=1.0,
+        )
+        submit = f[4].form_submit_button("Add bet", type="primary")
         if submit and desc:
-            st.session_state.bets.append({
+            bet = {
                 "id": str(time.time()),
                 "date": today,
-                "desc": desc,
+                "description": desc,
                 "book": book,
                 "odds": int(odds),
                 "stake": float(stake),
                 "to_win": float(stake) * (american_to_decimal(int(odds)) - 1.0),
                 "status": "open",
-            })
+                "kind": "single",
+                "legs": None,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            db_insert_bet(bet)
+            st.rerun()
 
     st.subheader("Active bets")
-    open_bets = [b for b in st.session_state.bets if b["status"] == "open"]
+    open_bets = [b for b in bets if b["status"] == "open"]
     if not open_bets:
         st.caption("No open bets.")
     for b in open_bets:
-        cols = st.columns([3, 2, 1, 1, 1, 1, 1])
-        cols[0].write(f"**{b['desc']}**")
+        cols = st.columns([3, 2, 1, 1, 1, 1, 1, 1])
+        cols[0].write(f"**{b['description']}**")
         cols[1].write(b["book"])
         cols[2].write(format_american(b["odds"]))
         cols[3].write(f"${b['stake']:,.2f}")
         cols[4].write(f"+${b['to_win']:,.2f}")
         if cols[5].button("Win", key=f"w{b['id']}"):
-            b["status"] = "won"
+            db_settle_bet(b["id"], "won")
             st.rerun()
         if cols[6].button("Loss", key=f"l{b['id']}"):
-            b["status"] = "lost"
+            db_settle_bet(b["id"], "lost")
+            st.rerun()
+        if cols[7].button("Del", key=f"d{b['id']}"):
+            db_delete_bet(b["id"])
             st.rerun()
 
-    settled = [b for b in st.session_state.bets if b["status"] != "open"]
     if settled:
-        pnl = sum(
-            b["to_win"] if b["status"] == "won" else -b["stake"]
-            for b in settled
-        )
-        color = GREEN if pnl >= 0 else RED
-        st.markdown(
-            kpi("Settled P&L", f"${pnl:,.2f}", color=color),
-            unsafe_allow_html=True,
-        )
+        st.subheader("Recent settled bets")
+        for b in sorted(
+            settled,
+            key=lambda x: x.get("settled_at") or "",
+            reverse=True,
+        )[:15]:
+            mark = "W" if b["status"] == "won" else "L"
+            color = GREEN if b["status"] == "won" else RED
+            delta = b["to_win"] if b["status"] == "won" else -b["stake"]
+            st.markdown(
+                f"<div class='pick-card'><b style='color:{color}'>{mark}</b> "
+                f"&nbsp; {b['description']} "
+                f"<span class='muted'>({format_american(b['odds'])} @ "
+                f"{b['book']}, ${b['stake']:,.2f})</span> "
+                f"<span style='float:right; color:{color}; font-weight:700'>"
+                f"${delta:+,.2f}</span></div>",
+                unsafe_allow_html=True,
+            )
