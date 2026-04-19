@@ -103,6 +103,13 @@ DB_PATH = os.environ.get("EDGE_DB_PATH", "edge_bets.db")
 CRIMSON = "#9E1B32"
 BG = "#0B1220"
 PANEL = "#121A2B"
+HALO = "#15203a"
+THEMES = {
+    "Bloomberg":   {"bg": "#0B1220", "panel": "#121A2B", "accent": "#9E1B32", "halo": "#15203a"},
+    "Vegas Gold":  {"bg": "#1A0420", "panel": "#2A0F30", "accent": "#FFD700", "halo": "#3E1450"},
+    "Matrix":      {"bg": "#000000", "panel": "#0A1A0A", "accent": "#00FF41", "halo": "#0F2A14"},
+    "Miami Sunset":{"bg": "#0E1B3A", "panel": "#1A2C4A", "accent": "#FF2E93", "halo": "#1F3A6E"},
+}
 GREEN = "#22C55E"
 AMBER = "#F59E0B"
 RED = "#EF4444"
@@ -690,6 +697,155 @@ def weekly_report_card(bets, start_bankroll):
     )
 
 
+def tick_class_for(key, current_dec):
+    last = st.session_state.get("last_dec", {})
+    prev = last.get(key)
+    cls = ""
+    if prev is not None:
+        if current_dec > prev + 0.005:
+            cls = "tick-up"
+        elif current_dec < prev - 0.005:
+            cls = "tick-down"
+    last[key] = current_dec
+    st.session_state["last_dec"] = last
+    return cls
+
+
+def play_sound(kind):
+    if not st.session_state.get("sfx_on"):
+        return
+    if kind == "win":
+        notes = "[523.25, 659.25, 783.99]"
+    elif kind == "loss":
+        notes = "[440, 349.23, 261.63]"
+    elif kind == "ath":
+        notes = "[523.25, 659.25, 783.99, 1046.5]"
+    else:
+        return
+    js = f"""
+<script>
+(function(){{
+  try {{
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    const notes = {notes};
+    const now = ctx.currentTime;
+    notes.forEach((f, i) => {{
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine'; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, now + i*0.14);
+      g.gain.exponentialRampToValueAtTime(0.18, now + i*0.14 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + i*0.14 + 0.30);
+      o.connect(g); g.connect(ctx.destination);
+      o.start(now + i*0.14); o.stop(now + i*0.14 + 0.32);
+    }});
+  }} catch(e) {{}}
+}})();
+</script>
+"""
+    st.markdown(js, unsafe_allow_html=True)
+
+
+def monte_carlo_forecast(bets, start_equity, current_equity,
+                         days_ahead=60, sims=600):
+    settled = [b for b in bets if b["status"] in ("won", "lost")]
+    if len(settled) < 5:
+        return None
+    pnls = [
+        b["to_win"] if b["status"] == "won" else -b["stake"]
+        for b in settled
+    ]
+    mean_pnl = sum(pnls) / len(pnls)
+    var = sum((p - mean_pnl) ** 2 for p in pnls) / max(1, len(pnls) - 1)
+    sd = var ** 0.5
+    if not settled:
+        bets_per_day = 2.0
+    else:
+        try:
+            first = datetime.fromisoformat(
+                (settled[0].get("created_at") or "").replace("Z", "+00:00")
+            )
+            last = datetime.fromisoformat(
+                (settled[-1].get("created_at") or "").replace("Z", "+00:00")
+            )
+            span_days = max(1.0, (last - first).total_seconds() / 86400)
+        except Exception:
+            span_days = max(1.0, len(settled) / 2.0)
+        bets_per_day = max(0.5, min(20.0, len(settled) / span_days))
+    import random
+    paths = []
+    for _ in range(sims):
+        eq = current_equity
+        path = [eq]
+        for _d in range(days_ahead):
+            n = max(1, int(round(random.gauss(bets_per_day, 1.0))))
+            for _b in range(n):
+                eq += random.gauss(mean_pnl, sd)
+            path.append(eq)
+        paths.append(path)
+    days = list(range(days_ahead + 1))
+    rows = []
+    for d in days:
+        col = sorted(p[d] for p in paths)
+        p10 = col[int(len(col) * 0.10)]
+        p50 = col[int(len(col) * 0.50)]
+        p90 = col[int(len(col) * 0.90)]
+        rows.append({
+            "day": d, "p10": p10, "p50": p50, "p90": p90,
+        })
+    final = sorted(p[-1] for p in paths)
+    return {
+        "rows": rows,
+        "p10": final[int(len(final) * 0.10)],
+        "p50": final[int(len(final) * 0.50)],
+        "p90": final[int(len(final) * 0.90)],
+        "edge_per_bet": mean_pnl,
+        "bets_per_day": bets_per_day,
+        "sample_size": len(settled),
+    }
+
+
+def ai_chat(prompt, context_text):
+    api_key = get_secret("OPENAI_API_KEY")
+    if not api_key:
+        return (
+            "OpenAI key not configured. Add OPENAI_API_KEY to your "
+            "Streamlit Cloud secrets to enable Ask Edge."
+        )
+    try:
+        from openai import OpenAI
+    except Exception:
+        return (
+            "openai package not installed. Add `openai>=1.40` to "
+            "requirements.txt and reboot the app."
+        )
+    try:
+        client = OpenAI(api_key=api_key)
+        sys = (
+            "You are EDGE, a sharp sports-betting analyst. The user "
+            "operates on a $500 bankroll, $1-$10 stakes. Be concise, "
+            "tactical, and reference the specific picks/numbers in the "
+            "context when answering. Never recommend illegal activity. "
+            "When suggesting bets, always include book, line, price, "
+            "and stake suggestion. Output in tight markdown."
+        )
+        rsp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": sys},
+                {"role": "user",
+                 "content": f"CONTEXT:\n{context_text}\n\nQUESTION: {prompt}"},
+            ],
+            temperature=0.4,
+            max_tokens=700,
+        )
+        return rsp.choices[0].message.content or "(empty response)"
+    except Exception as e:
+        return f"AI error: {e}"
+
+
 def card_style_for_pick(matchup):
     if " @ " in (matchup or ""):
         away, home = matchup.split(" @ ", 1)
@@ -1205,7 +1361,38 @@ st.set_page_config(
 CSS = """
 <style>
 :root { color-scheme: dark; }
-.stApp { background: radial-gradient(ellipse at top, #15203a 0%, __BG__ 60%); }
+.stApp { background: radial-gradient(ellipse at top, __HALO__ 0%, __BG__ 60%); }
+#edge-splash {
+    position:fixed; inset:0; z-index:999999;
+    background: radial-gradient(circle at center, __HALO__ 0%, __BG__ 75%);
+    display:flex; align-items:center; justify-content:center;
+    animation: splashfade 1.7s ease-out forwards;
+}
+.edge-splash-logo {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-weight: 900; letter-spacing: .35em;
+    font-size: clamp(48px, 12vw, 160px); color: __CRIMSON__;
+    text-shadow: 0 0 40px __CRIMSON__, 0 0 80px __CRIMSON__;
+    animation: splashpulse 1.6s cubic-bezier(.2,.9,.2,1) forwards;
+}
+.edge-splash-tag {
+    position:absolute; bottom: 22%; color: __MUTED__;
+    font-family: ui-monospace, monospace; letter-spacing:.4em;
+    font-size:.75rem; opacity:0; animation: splashtag 1.6s .35s ease-out forwards;
+}
+@keyframes splashfade {
+    0%,68% {opacity:1; pointer-events:auto;}
+    100% {opacity:0; pointer-events:none; visibility:hidden;}
+}
+@keyframes splashpulse {
+    0%   {transform: scale(.55); filter: blur(24px); opacity:0;}
+    55%  {transform: scale(1.07); filter: blur(0); opacity:1;}
+    100% {transform: scale(1);    filter: blur(0); opacity:1;}
+}
+@keyframes splashtag {
+    0%   {opacity:0; transform: translateY(8px);}
+    100% {opacity:.9; transform: translateY(0);}
+}
 .block-container { padding-top: 1.4rem; }
 h1, h2, h3, h4 { color: #F8FAFC !important; letter-spacing: -0.01em; }
 section[data-testid="stSidebar"] { background: __PANEL__; }
@@ -1255,7 +1442,7 @@ section[data-testid="stSidebar"] { background: __PANEL__; }
 @keyframes live-pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.7)} }
 .ticker {
     display: inline-block; white-space: nowrap; padding-left: 100%;
-    animation: ticker-scroll 45s linear infinite;
+    animation: ticker-scroll 60s linear infinite;
     font-variant-numeric: tabular-nums;
 }
 .ticker:hover { animation-play-state: paused; }
@@ -1332,6 +1519,17 @@ section[data-testid="stSidebar"] { background: __PANEL__; }
 .report-tbl { width:100%; margin-top:14px; font-size:.85rem; border-collapse:collapse; }
 .report-tbl th { text-align:left; color:#94A3B8; font-weight:600; font-size:.72rem; text-transform:uppercase; letter-spacing:.06em; padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.08); }
 .report-tbl td { padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.04); }
+.tick-up   { animation: tickFlashUp 1.6s ease-out 1; padding:0 4px; border-radius:4px; }
+.tick-down { animation: tickFlashDown 1.6s ease-out 1; padding:0 4px; border-radius:4px; }
+@keyframes tickFlashUp {
+    0%   { background:rgba(34,197,94,.85); color:#0B1220; box-shadow:0 0 12px rgba(34,197,94,.7); }
+    100% { background:transparent; color:inherit; box-shadow:none; }
+}
+@keyframes tickFlashDown {
+    0%   { background:rgba(239,68,68,.85); color:#0B1220; box-shadow:0 0 12px rgba(239,68,68,.7); }
+    100% { background:transparent; color:inherit; box-shadow:none; }
+}
+.ai-prompt-btn { font-size:.85rem !important; }
 .ath-cannon {
     background:linear-gradient(90deg,#FDE68A 0%,__GREEN__ 50%,#FDE68A 100%);
     background-size:200% 100%;
@@ -1419,16 +1617,37 @@ table { color: #E2E8F0; }
 .stTabs [aria-selected="true"] { background: __CRIMSON__ !important; color: white !important; }
 </style>
 """
+_theme_name = st.sidebar.selectbox(
+    "Theme", list(THEMES.keys()), index=0, key="theme_choice",
+    help="Color palette for the dashboard.",
+)
+_theme = THEMES[_theme_name]
+CRIMSON = _theme["accent"]
+BG = _theme["bg"]
+PANEL = _theme["panel"]
+HALO = _theme["halo"]
+
 CSS = (
-    CSS.replace("__BG__", BG)
-       .replace("__PANEL__", PANEL)
-       .replace("__CRIMSON__", CRIMSON)
+    CSS.replace("__BG__", _theme["bg"])
+       .replace("__PANEL__", _theme["panel"])
+       .replace("__CRIMSON__", _theme["accent"])
+       .replace("__HALO__", _theme["halo"])
        .replace("__MUTED__", MUTED)
        .replace("__GREEN__", GREEN)
        .replace("__AMBER__", AMBER)
        .replace("__RED__", RED)
 )
 st.markdown(CSS, unsafe_allow_html=True)
+
+if not st.session_state.get("splash_shown"):
+    st.session_state["splash_shown"] = True
+    st.markdown(
+        "<div id='edge-splash'>"
+        "<div class='edge-splash-logo'>EDGE</div>"
+        "<div class='edge-splash-tag'>SHARP. FAST. RUTHLESS.</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 with st.sidebar:
     st.markdown("### Bankroll")
@@ -1484,6 +1703,14 @@ with st.sidebar:
             league_toggle[lg["id"]] = st.checkbox(
                 lg["id"], value=True, key=f"lg_{lg['id']}",
             )
+
+    st.markdown("---")
+    sfx_on = st.checkbox(
+        "Sound effects",
+        value=st.session_state.get("sfx_on", False),
+        help="Plays a quick chime on win / loss / new all-time high.",
+    )
+    st.session_state["sfx_on"] = sfx_on
 
     st.markdown("---")
     st.caption(f"Storage: {storage_label()}")
@@ -1602,9 +1829,12 @@ for b in SPORTSBOOK_LINKS:
 links_html += "</div>"
 st.markdown(links_html, unsafe_allow_html=True)
 
-tab_picks, tab_props, tab_pp_board, tab_parlay, tab_board, tab_bank = st.tabs(
+(
+    tab_picks, tab_props, tab_pp_board, tab_parlay,
+    tab_board, tab_bank, tab_ai,
+) = st.tabs(
     ["Suggested Picks", "PrizePicks Picks", "PrizePicks Board",
-     "Parlay Builder", "Odds Board", "Bankroll"]
+     "Parlay Builder", "Odds Board", "Bankroll", "Ask Edge"]
 )
 
 with tab_picks:
@@ -1844,7 +2074,8 @@ with tab_picks:
                 f"&nbsp;&nbsp;{r['league']} - {r['market']}</span></div>"
                 f"<div class='pick-sub' style='margin-top:4px;'>Pick: "
                 f"<b style='color:#F8FAFC'>{r['pick']}</b> "
-                f"@ {format_american(r['price'])} on {book_badge(r['book'])} - "
+                f"@ <span class='{tick_class_for(pick_key_team(r), r['best_dec'])}'>"
+                f"{format_american(r['price'])}</span> on {book_badge(r['book'])} - "
                 f"{r['books_count']} books compared</div>"
                 f"<div style='margin-top:6px;'>{spark_html}</div>"
                 "</div>"
@@ -1858,7 +2089,9 @@ with tab_picks:
             st.markdown(card, unsafe_allow_html=True)
             if capped > 0:
                 lock_key = f"lock_team_{r['league']}_{r['matchup']}_{r['pick']}"
-                if st.button(
+                why_key = f"why_team_{r['league']}_{r['matchup']}_{r['pick']}"
+                bcols = st.columns([1, 1, 5])
+                if bcols[0].button(
                     "Lock it in", key=lock_key, type="secondary",
                 ):
                     queue_prefill_bet(
@@ -1866,6 +2099,26 @@ with tab_picks:
                         f"{r['matchup']} {r['league']}",
                         r["book"], r["price"], capped,
                     )
+                if bcols[1].button(
+                    "Why?", key=f"btn_{why_key}", type="secondary",
+                    help="Ask Edge AI to explain this pick",
+                ):
+                    with st.spinner("Edge is analyzing..."):
+                        st.session_state[why_key] = ai_chat(
+                            f"In 3-4 short sentences, explain the EDGE on this "
+                            f"pick: {r['pick']} ({r['market']}) for "
+                            f"{r['matchup']} ({r['league']}) at "
+                            f"{format_american(r['price'])} on {r['book']}. "
+                            f"Edge: {format_bps(r['edge_bps'])}, "
+                            f"{r['books_count']} books in consensus. "
+                            f"Suggested stake ${capped:.2f} on "
+                            f"${bankroll:.2f} bankroll. Be concrete about "
+                            f"why the price is mispriced and what would "
+                            f"have to go right.",
+                            "",
+                        )
+                if st.session_state.get(why_key):
+                    st.info(st.session_state[why_key])
         if running >= daily_cap:
             st.caption(
                 f"Daily cap of ${daily_cap:,.2f} reached. Remaining picks shown as Pass."
@@ -1919,7 +2172,8 @@ with tab_props:
                 f"<div class='pick-sub' style='margin-top:4px;'>"
                 f"{matchup_badges(r['matchup'])}"
                 f"<span style='margin:0 8px;' class='muted'>{r['league']}</span>"
-                f"best @ {format_american(r['price'])} on {book_badge(r['book'])} - "
+                f"best @ <span class='{tick_class_for(prop_key, r['best_dec'])}'>"
+                f"{format_american(r['price'])}</span> on {book_badge(r['book'])} - "
                 f"{r['books_count']} books</div>"
                 f"<div style='margin-top:6px;'>{spark_html}</div>"
                 "</div>"
@@ -1933,7 +2187,9 @@ with tab_props:
             st.markdown(card, unsafe_allow_html=True)
             if stake > 0:
                 lock_key = f"lock_prop_{prop_key}"
-                if st.button(
+                why_key = f"why_prop_{prop_key}"
+                bcols = st.columns([1, 1, 5])
+                if bcols[0].button(
                     "Lock it in", key=lock_key, type="secondary",
                 ):
                     queue_prefill_bet(
@@ -1941,6 +2197,25 @@ with tab_props:
                         f"{r['line']:g} - {r['matchup']} {r['league']}",
                         r["book"], r["price"], stake,
                     )
+                if bcols[1].button(
+                    "Why?", key=f"btn_{why_key}", type="secondary",
+                    help="Ask Edge AI to explain this prop",
+                ):
+                    with st.spinner("Edge is analyzing..."):
+                        st.session_state[why_key] = ai_chat(
+                            f"In 3-4 short sentences, explain the EDGE on "
+                            f"this player prop: {r['player']} {r['stat']} "
+                            f"{r['side']} {r['line']:g} in {r['matchup']} "
+                            f"({r['league']}) at "
+                            f"{format_american(r['price'])} on {r['book']}. "
+                            f"Edge: {format_bps(r['edge_bps'])} across "
+                            f"{r['books_count']} books. Suggested stake "
+                            f"${stake:.2f}. Be concrete about usage rate, "
+                            f"matchup, recent form, or line shopping.",
+                            "",
+                        )
+                if st.session_state.get(why_key):
+                    st.info(st.session_state[why_key])
 
 with tab_pp_board:
     st.subheader("PrizePicks Board Builder")
@@ -2214,6 +2489,53 @@ with tab_bank:
         weekly_report_card(bets, bankroll), unsafe_allow_html=True,
     )
 
+    with st.expander("Bankroll forecaster (Monte-Carlo, 60 days)"):
+        forecast_days = st.slider(
+            "Days to project", 14, 120, 60, 7, key="forecast_days",
+        )
+        fc = monte_carlo_forecast(
+            bets, bankroll, equity, days_ahead=forecast_days,
+        )
+        if not fc:
+            st.info(
+                "Need at least 5 settled bets to forecast. Keep grinding."
+            )
+        else:
+            fc_df = pd.DataFrame(fc["rows"])
+            band = (
+                alt.Chart(fc_df)
+                .mark_area(opacity=0.25, color=GREEN)
+                .encode(
+                    x=alt.X("day:Q", title="Days from today"),
+                    y=alt.Y("p10:Q", title="Equity ($)"),
+                    y2="p90:Q",
+                )
+            )
+            median_line = (
+                alt.Chart(fc_df).mark_line(color="#FDE68A", strokeWidth=2)
+                .encode(x="day:Q", y="p50:Q")
+            )
+            st.altair_chart(
+                (band + median_line)
+                .properties(height=220, background=PANEL),
+                use_container_width=True,
+            )
+            f1, f2, f3, f4 = st.columns(4)
+            f1.metric("Median (p50)", f"${fc['p50']:,.0f}",
+                      delta=f"{((fc['p50'] - equity) / equity * 100):+.1f}%"
+                      if equity else None)
+            f2.metric("Pessimistic (p10)", f"${fc['p10']:,.0f}")
+            f3.metric("Optimistic (p90)", f"${fc['p90']:,.0f}")
+            f4.metric(
+                "Edge / bet", f"${fc['edge_per_bet']:+.2f}",
+                help=f"From {fc['sample_size']} settled bets, "
+                f"~{fc['bets_per_day']:.1f} bets/day",
+            )
+            st.caption(
+                "Simulates 600 random futures using your historical "
+                "bet sizes and pacing. Wider band = more variance."
+            )
+
     try:
         prev_ath = float(db_get_kv("ath", str(bankroll)) or bankroll)
     except Exception:
@@ -2229,10 +2551,12 @@ with tab_bank:
                 f"${prev_ath:,.2f}</span></div>",
                 unsafe_allow_html=True,
             )
+            play_sound("ath")
 
     fx = st.session_state.pop("fx", None)
     if fx == "win":
         st.balloons()
+        play_sound("win")
         st.markdown(
             "<div style='background:rgba(34,197,94,.18);border:1px solid "
             f"{GREEN};color:{GREEN};padding:10px 14px;border-radius:10px;"
@@ -2243,6 +2567,7 @@ with tab_bank:
             unsafe_allow_html=True,
         )
     elif fx == "loss":
+        play_sound("loss")
         st.markdown(
             "<div id='lossfx' style='position:fixed;top:0;left:0;right:0;"
             "bottom:0;background:rgba(239,68,68,.35);z-index:9998;"
@@ -2558,10 +2883,32 @@ with tab_bank:
             st.rerun()
 
     if settled:
-        st.subheader("Recent settled bets")
-        for b in sorted(
+        st.subheader("Bet history")
+        hist_q = st.text_input(
+            "Search description / book / status",
+            placeholder="e.g. lebron, draftkings, won, lakers ml",
+            key="hist_search",
+        ).strip().lower()
+        sorted_settled = sorted(
             settled, key=lambda x: x.get("settled_at") or "", reverse=True,
-        )[:15]:
+        )
+        if hist_q:
+            tokens = [t for t in hist_q.split() if t]
+            filtered = [
+                b for b in sorted_settled
+                if all(
+                    tok in (
+                        f"{b.get('description', '')} {b.get('book', '')} "
+                        f"{b.get('status', '')} {b.get('date', '')}"
+                    ).lower()
+                    for tok in tokens
+                )
+            ]
+            st.caption(f"{len(filtered)} of {len(sorted_settled)} match.")
+            shown = filtered[:50]
+        else:
+            shown = sorted_settled[:15]
+        for b in shown:
             mark = "W" if b["status"] == "won" else "L"
             color = GREEN if b["status"] == "won" else RED
             delta = b["to_win"] if b["status"] == "won" else -b["stake"]
@@ -2574,3 +2921,182 @@ with tab_bank:
                 f"${delta:+,.2f}</span></div>",
                 unsafe_allow_html=True,
             )
+
+with tab_ai:
+    st.subheader("Ask Edge")
+    st.caption(
+        "Talk to a sharp-betting AI that can see today's picks, your "
+        "bankroll, and your recent bets. Powered by OpenAI."
+    )
+
+    if not get_secret("OPENAI_API_KEY"):
+        st.warning(
+            "Add `OPENAI_API_KEY` to your Streamlit Cloud secrets to enable "
+            "Ask Edge. (Manage app -> Settings -> Secrets, then reboot.)"
+        )
+
+    with st.expander("Voice mode (tap mic, speak, paste into chat)"):
+        st.components.v1.html(
+            """
+<div style="font-family:ui-monospace,monospace;color:#E2E8F0;">
+  <button id="edge-mic" style="
+    background:#9E1B32;color:#fff;border:none;border-radius:999px;
+    padding:14px 22px;font-weight:800;font-size:.95rem;cursor:pointer;
+    box-shadow:0 0 18px rgba(158,27,50,.6);">
+    TAP TO SPEAK
+  </button>
+  <span id="edge-mic-status" style="margin-left:14px;color:#94A3B8;
+    font-size:.85rem;">Mic idle.</span>
+  <div id="edge-mic-out" style="margin-top:14px;padding:12px 14px;
+    background:#0F172A;border:1px solid rgba(255,255,255,.08);
+    border-radius:10px;min-height:48px;color:#FDE68A;font-size:.95rem;">
+    Your transcript will appear here.
+  </div>
+  <div style="margin-top:8px;color:#94A3B8;font-size:.78rem;">
+    Auto-copied to clipboard. Paste into the chat box below with Cmd/Ctrl+V.
+  </div>
+</div>
+<script>
+(function(){
+  const btn = document.getElementById('edge-mic');
+  const status = document.getElementById('edge-mic-status');
+  const out = document.getElementById('edge-mic-out');
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    btn.disabled = true;
+    btn.style.opacity = .5;
+    status.textContent = 'Speech recognition not supported in this browser. Try Chrome.';
+    return;
+  }
+  let rec = null, listening = false, finalText = '';
+  btn.addEventListener('click', () => {
+    if (listening) { rec && rec.stop(); return; }
+    finalText = '';
+    rec = new SR();
+    rec.lang = 'en-US';
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.onstart = () => {
+      listening = true;
+      btn.textContent = 'STOP';
+      btn.style.background = '#EF4444';
+      status.textContent = 'Listening...';
+    };
+    rec.onresult = (e) => {
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) finalText += t + ' ';
+        else interim += t;
+      }
+      out.textContent = (finalText + interim).trim() || 'Listening...';
+    };
+    rec.onerror = (e) => {
+      status.textContent = 'Error: ' + e.error;
+    };
+    rec.onend = () => {
+      listening = false;
+      btn.textContent = 'TAP TO SPEAK';
+      btn.style.background = '#9E1B32';
+      const text = finalText.trim();
+      if (text) {
+        navigator.clipboard.writeText(text).then(
+          () => status.textContent = 'Captured & copied. Paste below ->',
+          () => status.textContent = 'Captured. (Clipboard blocked - select & copy manually.)'
+        );
+      } else {
+        status.textContent = 'No speech captured.';
+      }
+    };
+    rec.start();
+  });
+})();
+</script>
+            """,
+            height=240,
+        )
+
+    if "ai_chat" not in st.session_state:
+        st.session_state["ai_chat"] = []
+
+    canned = [
+        ("Top 3 risk-reward picks today", "Of the picks in CONTEXT, give me the 3 best risk/reward plays for a $500 bankroll, $1-$10 stakes. For each, give book, line, price, suggested stake, and a one-sentence why."),
+        ("Build me a 3-leg PrizePicks Power Play", "Using the player props in CONTEXT, suggest a correlated 3-leg PrizePicks Power Play with the highest hit probability. Show each leg, combined probability, and EV vs the 5x payout."),
+        ("Biggest leak in my recent bets", "Look at my recent bets in CONTEXT and tell me my biggest leak (sport, market, side, stake size, or book). Be specific and quantitative."),
+        ("Should I tilt-fade today?", "Given my recent results in CONTEXT, am I on tilt? Should I lower my stakes today, take a break, or stay the course? Tactical answer."),
+        ("Hedge any open bets?", "Look at the open bets in CONTEXT and the current odds. Recommend any hedges with stake amounts that lock in profit or cut variance."),
+        ("What single pick should I make right now?", "Pick exactly one bet from CONTEXT for me to fire right now. Justify with edge, book, and stake. No hedging - one pick."),
+    ]
+    pcols = st.columns(3)
+    canned_clicked = None
+    for i, (label, prompt) in enumerate(canned):
+        if pcols[i % 3].button(label, key=f"canned_{i}", use_container_width=True):
+            canned_clicked = prompt
+
+    for msg in st.session_state["ai_chat"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    user_input = st.chat_input("Ask anything about today's slate or your bets")
+
+    prompt_to_send = canned_clicked or user_input
+    if prompt_to_send:
+        ctx_lines = []
+        ctx_lines.append(f"Bankroll: ${bankroll:,.2f}, equity: ${equity:,.2f}, daily exposure: ${today_exposure:,.2f} of ${daily_cap:,.2f} cap.")
+        ctx_lines.append(f"Active leagues: {', '.join(sorted(leagues_filter))}. Books: {', '.join(sorted(books_filter))}.")
+        ctx_lines.append("\nTOP TEAM PICKS (top 12 by edge):")
+        for r in all_team_picks[:12]:
+            ctx_lines.append(
+                f"- {r['matchup']} ({r['league']}) {r['market']}: {r['pick']} "
+                f"@ {format_american(r['price'])} on {r['book']} - "
+                f"edge {format_bps(r['edge_bps'])}, {r['books_count']} books"
+            )
+        ctx_lines.append("\nTOP PROP PICKS (top 12 by edge):")
+        for r in all_prop_picks[:12]:
+            ctx_lines.append(
+                f"- {r['player']} {r['stat']} {r['side']} {r['line']:g} "
+                f"({r['matchup']}, {r['league']}) @ "
+                f"{format_american(r['price'])} on {r['book']} - "
+                f"edge {format_bps(r['edge_bps'])}"
+            )
+        open_b = [b for b in bets if b["status"] == "open"][:10]
+        if open_b:
+            ctx_lines.append("\nOPEN BETS:")
+            for b in open_b:
+                ctx_lines.append(
+                    f"- {b['description']} @ {format_american(b['odds'])} "
+                    f"on {b['book']}, ${b['stake']:.2f} -> "
+                    f"${b['to_win']:.2f} potential"
+                )
+        recent = sorted(
+            [b for b in bets if b["status"] in ("won", "lost")],
+            key=lambda x: x.get("settled_at") or "", reverse=True,
+        )[:15]
+        if recent:
+            ctx_lines.append("\nRECENT SETTLED BETS:")
+            for b in recent:
+                d = b["to_win"] if b["status"] == "won" else -b["stake"]
+                ctx_lines.append(
+                    f"- [{b['status'].upper()}] {b['description']} "
+                    f"({b.get('book', '?')}, ${b['stake']:.2f}) "
+                    f"P&L ${d:+.2f}"
+                )
+        context_text = "\n".join(ctx_lines)
+
+        st.session_state["ai_chat"].append(
+            {"role": "user", "content": prompt_to_send}
+        )
+        with st.chat_message("user"):
+            st.markdown(prompt_to_send)
+        with st.chat_message("assistant"):
+            with st.spinner("Edge is thinking..."):
+                reply = ai_chat(prompt_to_send, context_text)
+            st.markdown(reply)
+        st.session_state["ai_chat"].append(
+            {"role": "assistant", "content": reply}
+        )
+
+    if st.session_state["ai_chat"]:
+        if st.button("Clear chat", key="clear_ai"):
+            st.session_state["ai_chat"] = []
+            st.rerun()
