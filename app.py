@@ -2261,19 +2261,19 @@ def render_live_dashboard():
             },
         )
 
-    with tabs[2]:
+    with tabs[3]:
         sportsbook_section("DraftKings")
 
-    with tabs[3]:
+    with tabs[4]:
         sportsbook_section("FanDuel")
 
-    with tabs[4]:
+    with tabs[5]:
         sportsbook_section("Bet365")
 
-    with tabs[5]:
+    with tabs[6]:
         sportsbook_section("PrizePicks")
 
-    with tabs[6]:
+    with tabs[7]:
         st.markdown('<div class="section-title">Bankroll + Exposure Rules</div>', unsafe_allow_html=True)
         b1, b2, b3, b4 = st.columns(4)
         with b1:
