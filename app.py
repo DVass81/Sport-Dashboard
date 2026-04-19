@@ -1,9 +1,15 @@
+import os
+import uuid
 from datetime import datetime, timezone
 
 import pandas as pd
 import requests
 import streamlit as st
 
+
+# -----------------------------
+# PAGE CONFIG
+# -----------------------------
 st.set_page_config(
     page_title="Sports Betting Dashboard",
     page_icon="🏈",
@@ -17,15 +23,265 @@ TARGET_BOOKS = {
     "bet365": "Bet365",
     "prizepicks": "PrizePicks",
 }
-DEFAULT_LEAGUES = ["NBA", "NFL", "MLB", "NHL"]
+
 BOOK_URLS = {
     "DraftKings": "https://sportsbook.draftkings.com/",
     "FanDuel": "https://sportsbook.fanduel.com/",
     "Bet365": "https://www.bet365.com/",
     "PrizePicks": "https://app.prizepicks.com/",
 }
-MAIN_MARKETS = {"Moneyline", "Spread", "Total"}
-PROP_MARKETS = {"Player Prop", "DFS Prop", "Team Total"}
+
+DEFAULT_LEAGUES = ["NBA", "NFL", "MLB", "NHL"]
+BET_LOG_FILE = "bet_log.csv"
+SNAPSHOT_FILE = "odds_snapshots.csv"
+
+BET_LOG_COLUMNS = [
+    "Bet ID",
+    "Logged At",
+    "Settled At",
+    "Sport",
+    "Event",
+    "Event ID",
+    "Odd ID",
+    "Market Bucket",
+    "Market",
+    "Pick",
+    "Sportsbook",
+    "Odds",
+    "Stake",
+    "Implied Prob",
+    "Model Prob",
+    "Edge %",
+    "Bet Score",
+    "Confidence",
+    "Reason",
+    "Start Time",
+    "Link",
+    "Bet Status",
+    "Result",
+    "PNL",
+]
+
+SNAPSHOT_COLUMNS = [
+    "Snapshot Key",
+    "Event ID",
+    "Odd ID",
+    "Sportsbook",
+    "First Seen At",
+    "Last Seen At",
+    "First Odds",
+    "Prev Odds",
+    "Current Odds",
+    "First Implied Prob",
+    "Prev Implied Prob",
+    "Current Implied Prob",
+]
+
+
+# -----------------------------
+# STYLING
+# -----------------------------
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background: linear-gradient(180deg, #eef4fb 0%, #e7eef8 100%);
+        color: #0f172a;
+    }
+
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #f7fbff 0%, #edf4fc 100%);
+        border-right: 1px solid rgba(15, 23, 42, 0.08);
+    }
+
+    .main-title {
+        font-size: 2.4rem;
+        font-weight: 900;
+        color: #0f172a;
+        margin-bottom: 0.15rem;
+        letter-spacing: 0.2px;
+    }
+
+    .sub-title {
+        font-size: 1rem;
+        color: #334155;
+        margin-bottom: 1rem;
+    }
+
+    .hero-box {
+        background: linear-gradient(135deg, #e0efff 0%, #d9e9fb 100%);
+        border: 1px solid rgba(37, 99, 235, 0.15);
+        border-radius: 22px;
+        padding: 18px 22px;
+        margin-bottom: 18px;
+        box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
+    }
+
+    .soft-card {
+        background: #ffffff;
+        border: 1px solid rgba(15, 23, 42, 0.08);
+        border-radius: 18px;
+        padding: 16px 18px;
+        box-shadow: 0 10px 20px rgba(15, 23, 42, 0.06);
+        margin-bottom: 14px;
+    }
+
+    .bet-card {
+        background: linear-gradient(135deg, #ffffff 0%, #f6fbff 100%);
+        border: 1px solid rgba(37, 99, 235, 0.14);
+        border-radius: 18px;
+        padding: 16px 18px;
+        box-shadow: 0 8px 18px rgba(37, 99, 235, 0.08);
+        margin-bottom: 12px;
+    }
+
+    .section-title {
+        font-size: 1.22rem;
+        font-weight: 800;
+        color: #0f172a;
+        margin-top: 6px;
+        margin-bottom: 10px;
+    }
+
+    .kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+        margin-bottom: 16px;
+    }
+
+    .kpi-card {
+        background: #ffffff;
+        border: 1px solid rgba(15, 23, 42, 0.08);
+        border-radius: 16px;
+        padding: 14px 16px;
+        box-shadow: 0 8px 18px rgba(15, 23, 42, 0.05);
+    }
+
+    .kpi-label {
+        color: #475569;
+        font-size: 0.88rem;
+        margin-bottom: 6px;
+    }
+
+    .kpi-value {
+        color: #0f172a;
+        font-size: 1.35rem;
+        font-weight: 900;
+    }
+
+    .pill {
+        display: inline-block;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-weight: 700;
+        margin-right: 6px;
+        margin-bottom: 6px;
+    }
+
+    .pill-blue { background: #dbeafe; color: #1d4ed8; }
+    .pill-green { background: #dcfce7; color: #15803d; }
+    .pill-yellow { background: #fef3c7; color: #a16207; }
+    .pill-red { background: #fee2e2; color: #b91c1c; }
+    .pill-slate { background: #e2e8f0; color: #334155; }
+
+    .quick-link-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+        margin-bottom: 12px;
+    }
+
+    .quick-link-card {
+        background: #ffffff;
+        border: 1px solid rgba(15, 23, 42, 0.08);
+        border-radius: 18px;
+        padding: 18px;
+        box-shadow: 0 10px 20px rgba(15, 23, 42, 0.06);
+        text-align: center;
+    }
+
+    .quick-link-card a {
+        text-decoration: none;
+        color: #0f172a;
+        font-weight: 800;
+    }
+
+    div[data-baseweb="select"] > div,
+    div[data-baseweb="base-input"] > div,
+    div[data-baseweb="textarea"] > div {
+        color: #0f172a !important;
+        background: #ffffff !important;
+    }
+
+    div[data-baseweb="select"] input,
+    div[data-baseweb="base-input"] input,
+    textarea {
+        color: #0f172a !important;
+    }
+
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        background: rgba(255,255,255,0.75);
+        border: 1px solid rgba(15, 23, 42, 0.08);
+        border-radius: 12px;
+        color: #0f172a;
+        padding: 10px 14px;
+    }
+
+    .stTabs [aria-selected="true"] {
+        background: #dbeafe !important;
+        color: #1d4ed8 !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# -----------------------------
+# FILE HELPERS
+# -----------------------------
+def ensure_csv_file(path: str, columns: list[str]) -> None:
+    if not os.path.exists(path):
+        pd.DataFrame(columns=columns).to_csv(path, index=False)
+
+
+def load_bet_log() -> pd.DataFrame:
+    ensure_csv_file(BET_LOG_FILE, BET_LOG_COLUMNS)
+    try:
+        df = pd.read_csv(BET_LOG_FILE)
+    except Exception:
+        df = pd.DataFrame(columns=BET_LOG_COLUMNS)
+
+    for col in ["Stake", "Implied Prob", "Model Prob", "Edge %", "Bet Score", "PNL"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    return df
+
+
+def save_bet_log(df: pd.DataFrame) -> None:
+    df.to_csv(BET_LOG_FILE, index=False)
+
+
+def load_snapshots() -> pd.DataFrame:
+    ensure_csv_file(SNAPSHOT_FILE, SNAPSHOT_COLUMNS)
+    try:
+        df = pd.read_csv(SNAPSHOT_FILE)
+    except Exception:
+        df = pd.DataFrame(columns=SNAPSHOT_COLUMNS)
+    for col in ["First Implied Prob", "Prev Implied Prob", "Current Implied Prob"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def save_snapshots(df: pd.DataFrame) -> None:
+    df.to_csv(SNAPSHOT_FILE, index=False)
 
 
 # -----------------------------
@@ -41,6 +297,18 @@ def american_to_implied(odds_value):
     if odds > 0:
         return round(100 / (odds + 100) * 100, 2)
     return round(abs(odds) / (abs(odds) + 100) * 100, 2)
+
+
+def american_profit(odds_value, stake):
+    try:
+        odds = int(str(odds_value).strip().replace("−", "-"))
+        stake = float(stake)
+    except Exception:
+        return 0.0
+
+    if odds > 0:
+        return round(stake * (odds / 100), 2)
+    return round(stake * (100 / abs(odds)), 2)
 
 
 def safe_team_name(team_dict, fallback):
@@ -78,9 +346,30 @@ def minutes_to_start(value):
     return round((dt - now_utc).total_seconds() / 60, 1)
 
 
+def format_pct(val):
+    try:
+        return f"{float(val):.2f}%"
+    except Exception:
+        return ""
+
+
+def pill_class_for_confidence(value: str) -> str:
+    mapping = {"Elite": "pill-blue", "High": "pill-green", "Medium": "pill-yellow", "Low": "pill-red"}
+    return mapping.get(value, "pill-slate")
+
+
+def pill_class_for_movement(value: str) -> str:
+    mapping = {"Improving": "pill-green", "Worse": "pill-red", "Flat": "pill-slate", "New": "pill-blue"}
+    return mapping.get(value, "pill-slate")
+
+
+def pill_class_for_final_status(value: str) -> str:
+    mapping = {"Bet": "pill-green", "Pass": "pill-yellow", "No Bet": "pill-red"}
+    return mapping.get(value, "pill-slate")
+
+
 def classify_market(market_name, pick, sportsbook):
     text = f"{market_name} {pick}".lower()
-
     if sportsbook == "PrizePicks":
         return "DFS Prop"
     if "moneyline" in text or text.strip() in {"ml", "winner"}:
@@ -89,10 +378,10 @@ def classify_market(market_name, pick, sportsbook):
         return "Spread"
     if "total" in text or "over " in text or "under " in text:
         return "Total"
-    if "player" in text or "points" in text or "rebounds" in text or "assists" in text or "hits" in text:
-        return "Player Prop"
     if "team total" in text:
         return "Team Total"
+    if "player" in text or "points" in text or "rebounds" in text or "assists" in text:
+        return "Player Prop"
     return "Other"
 
 
@@ -100,7 +389,6 @@ def build_pick_label(odd, quote, home_name, away_name, players):
     side_id = str(odd.get("sideID", "") or "")
     stat_entity_id = str(odd.get("statEntityID", "") or "")
     market_name = str(odd.get("marketName", "") or "Market")
-
     simple_entities = {"all", "home", "away", "draw", "home+draw", "away+draw"}
 
     if quote.get("overUnder") is not None:
@@ -143,166 +431,8 @@ def build_pick_label(odd, quote, home_name, away_name, players):
     return market_name
 
 
-def make_link_markdown(url):
-    if not url:
-        return ""
-    return f"[Open]({url})"
-
-
-def format_minutes(value):
-    if value is None or pd.isna(value):
-        return "—"
-    if value < 0:
-        return "Live/Started"
-    hours = int(value // 60)
-    mins = int(value % 60)
-    if hours == 0:
-        return f"{mins}m"
-    return f"{hours}h {mins}m"
-
-
-def strong_shop_alerts(df):
-    if df.empty:
-        return 0
-    return int((df["Best Line Gap %"] >= 3.0).sum())
-
-
-def market_sort_value(bucket):
-    order = {
-        "Moneyline": 1,
-        "Spread": 2,
-        "Total": 3,
-        "Team Total": 4,
-        "Player Prop": 5,
-        "DFS Prop": 6,
-        "Other": 7,
-    }
-    return order.get(bucket, 8)
-
-
-def make_badge_html(text, variant):
-    return f'<span class="badge badge-{variant}">{text}</span>'
-
-
-def confidence_badge_text(value):
-    mapping = {
-        "Elite": "🔵 Elite",
-        "High": "🟢 High",
-        "Medium": "🟡 Medium",
-        "Low": "⚪ Low",
-    }
-    return mapping.get(value, str(value))
-
-
-def move_badge_text(value):
-    mapping = {
-        "Improving": "📈 Improving",
-        "Flat": "➖ Flat",
-        "Worse": "📉 Worse",
-        "New": "🆕 New",
-    }
-    return mapping.get(value, str(value))
-
-
-def decision_badge_text(value):
-    mapping = {
-        "Within Limits": "✅ Within Limits",
-        "Trimmed": "✂️ Trimmed",
-        "Correlation Pass": "🚫 Correlation Pass",
-        "Exposure Pass": "⛔ Exposure Pass",
-        "Below Threshold": "⚪ Below Threshold",
-        "Pending Review": "🕒 Pending Review",
-    }
-    return mapping.get(value, str(value))
-
-
-def build_badges_html(row):
-    conf_map = {"Elite": "elite", "High": "high", "Medium": "medium", "Low": "low"}
-    move_map = {"Improving": "improving", "Flat": "flat", "Worse": "worse", "New": "new"}
-    decision_value = row.get("Allocation Status", "")
-    decision_map = {
-        "Within Limits": "within",
-        "Trimmed": "trimmed",
-        "Correlation Pass": "blocked",
-        "Exposure Pass": "blocked",
-        "Below Threshold": "low",
-        "Pending Review": "flat",
-    }
-    pieces = [
-        make_badge_html(str(row.get("Confidence", "")), conf_map.get(row.get("Confidence", ""), "flat")),
-        make_badge_html(str(row.get("Move Label", "")), move_map.get(row.get("Move Label", ""), "flat")),
-        make_badge_html(str(decision_value), decision_map.get(decision_value, "flat")),
-    ]
-    return "".join(pieces)
-
-
-def watchlist_match(row, query):
-    if not query:
-        return False
-    q = str(query).strip().lower()
-    if not q:
-        return False
-    haystack = " ".join([
-        str(row.get("Event", "")),
-        str(row.get("Pick", "")),
-        str(row.get("Market", "")),
-        str(row.get("Sportsbook", "")),
-        str(row.get("Sport", "")),
-    ]).lower()
-    return q in haystack
-
-
-def render_quick_links():
-    st.markdown('<div class="section-title">Quick Sportsbook Links</div>', unsafe_allow_html=True)
-    cols = st.columns(4)
-    books = [
-        ("DraftKings", "🟩"),
-        ("FanDuel", "🟦"),
-        ("Bet365", "🟢"),
-        ("PrizePicks", "🟧"),
-    ]
-    for col, (book, icon) in zip(cols, books):
-        with col:
-            st.markdown(
-                f"""
-                <div class="book-link-card">
-                    <div class="book-link-title">{icon} {book}</div>
-                    <div class="book-link-sub">Open the sportsbook site fast</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            try:
-                st.link_button(f"Open {book}", BOOK_URLS[book], use_container_width=True)
-            except Exception:
-                st.markdown(f"[Open {book}]({BOOK_URLS[book]})")
-
-
-def build_explain_bet_markdown(row, compare_df=None):
-    notes = []
-    notes.append(f"**Why the board likes it:** {row.get('Reason', 'No base reason provided.')}")
-    notes.append(f"**Current price:** {row.get('Sportsbook', 'Book')} {row.get('Odds', '')} with implied probability {row.get('Implied Prob', 0):.2f}%.")
-    notes.append(f"**Model vs market:** model probability {row.get('Model Prob', 0):.2f}% vs edge {row.get('Edge %', 0):.2f}%.")
-    notes.append(f"**Score + sizing:** bet score {row.get('Bet Score', 0):.2f}, recommended ${int(row.get('Recommended Bet', 0))}, final allocation ${int(row.get('Final Bet', 0))}.")
-    notes.append(f"**Line movement:** previous odds {row.get('Prev Odds', '—')} to current {row.get('Odds', '')}, labeled {row.get('Move Label', 'Flat')} ({row.get('Line Move %', 0):+.2f}%).")
-    notes.append(f"**Risk controls:** {row.get('Allocation Status', '—')}. {row.get('Pass Reason', '') or 'No extra pass note; the play fits the current controls.'}")
-    if compare_df is not None and not compare_df.empty:
-        same = compare_df[
-            (compare_df["Event"] == row.get("Event"))
-            & (compare_df["Pick"] == row.get("Pick"))
-            & (compare_df["Market"] == row.get("Market"))
-        ]
-        if not same.empty:
-            comp = same.iloc[0]
-            notes.append(
-                f"**Best-book context:** best book is {comp.get('Best Sportsbook', '—')} at {comp.get('Best Odds', '—')} with a line gap of {comp.get('Line Gap %', 0):.2f}% across {int(comp.get('Books_Quoting', 0) or 0)} books."
-            )
-    return "\n\n".join(notes)
-
-
-
 # -----------------------------
-# LIVE FETCH
+# LIVE ODDS FETCH
 # -----------------------------
 @st.cache_data(ttl=900, show_spinner="Loading live odds...")
 def fetch_events(leagues):
@@ -330,7 +460,6 @@ def fetch_events(leagues):
 
 def flatten_events_to_rows(events):
     rows = []
-
     for event in events:
         event_id = event.get("eventID", "")
         league_id = event.get("leagueID", "")
@@ -371,14 +500,8 @@ def flatten_events_to_rows(events):
                     players=players,
                 )
 
-                deep_link = quote.get("deeplink") or event_links.get(book_id, "")
-                sportsbook_name = TARGET_BOOKS[book_id]
-                market_bucket = classify_market(market_name, pick_label, sportsbook_name)
-                row_key = f"{event_id}|{odd_id}|{book_id}"
-
                 rows.append(
                     {
-                        "Row Key": row_key,
                         "Event ID": event_id,
                         "Odd ID": odd_id,
                         "Sport": league_id or sport_id,
@@ -386,30 +509,106 @@ def flatten_events_to_rows(events):
                         "Start Time": starts_at,
                         "Minutes To Start": minutes_to_start(starts_at),
                         "Market": market_name,
-                        "Market Bucket": market_bucket,
+                        "Market Bucket": classify_market(market_name, pick_label, TARGET_BOOKS[book_id]),
                         "Pick": pick_label,
-                        "Sportsbook": sportsbook_name,
+                        "Sportsbook": TARGET_BOOKS[book_id],
                         "Sportsbook ID": book_id,
                         "Odds": str(odds_value),
                         "Implied Prob": implied_prob,
                         "Line": quote.get("spread") or quote.get("overUnder") or "",
                         "Last Update": quote.get("lastUpdatedAt", ""),
-                        "Link": deep_link,
+                        "Link": quote.get("deeplink") or event_links.get(book_id, ""),
                     }
                 )
-
     return pd.DataFrame(rows)
+
+
+# -----------------------------
+# SNAPSHOTS / LINE MOVEMENT
+# -----------------------------
+def update_snapshot_tracking(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    snapshots = load_snapshots()
+    now_str = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
+
+    out = df.copy()
+    first_odds_list = []
+    prev_odds_list = []
+    current_odds_list = []
+    movement_label_list = []
+    movement_delta_list = []
+
+    for _, row in out.iterrows():
+        snapshot_key = f"{row['Event ID']}|{row['Odd ID']}|{row['Sportsbook']}"
+        implied = float(row["Implied Prob"])
+
+        match = snapshots[snapshots["Snapshot Key"].astype(str) == snapshot_key]
+        if match.empty:
+            new_snapshot = {
+                "Snapshot Key": snapshot_key,
+                "Event ID": row["Event ID"],
+                "Odd ID": row["Odd ID"],
+                "Sportsbook": row["Sportsbook"],
+                "First Seen At": now_str,
+                "Last Seen At": now_str,
+                "First Odds": row["Odds"],
+                "Prev Odds": row["Odds"],
+                "Current Odds": row["Odds"],
+                "First Implied Prob": implied,
+                "Prev Implied Prob": implied,
+                "Current Implied Prob": implied,
+            }
+            snapshots = pd.concat([snapshots, pd.DataFrame([new_snapshot])], ignore_index=True)
+            first_odds_list.append(row["Odds"])
+            prev_odds_list.append(row["Odds"])
+            current_odds_list.append(row["Odds"])
+            movement_label_list.append("New")
+            movement_delta_list.append(0.0)
+        else:
+            idx = match.index[0]
+            prev_implied = snapshots.at[idx, "Current Implied Prob"]
+            prev_odds = snapshots.at[idx, "Current Odds"]
+
+            snapshots.at[idx, "Prev Odds"] = prev_odds
+            snapshots.at[idx, "Prev Implied Prob"] = prev_implied
+            snapshots.at[idx, "Current Odds"] = row["Odds"]
+            snapshots.at[idx, "Current Implied Prob"] = implied
+            snapshots.at[idx, "Last Seen At"] = now_str
+
+            delta = round(float(prev_implied) - implied, 2)
+            if delta > 0.15:
+                movement = "Improving"
+            elif delta < -0.15:
+                movement = "Worse"
+            else:
+                movement = "Flat"
+
+            first_odds_list.append(snapshots.at[idx, "First Odds"])
+            prev_odds_list.append(prev_odds)
+            current_odds_list.append(row["Odds"])
+            movement_label_list.append(movement)
+            movement_delta_list.append(delta)
+
+    save_snapshots(snapshots)
+    out["First Odds Seen"] = first_odds_list
+    out["Previous Odds"] = prev_odds_list
+    out["Current Odds"] = current_odds_list
+    out["Movement"] = movement_label_list
+    out["Movement Delta %"] = movement_delta_list
+    return out
 
 
 # -----------------------------
 # SCORING
 # -----------------------------
 def confidence_from_score(score):
-    if score >= 7.0:
+    if score >= 7:
         return "Elite"
-    if score >= 5.0:
+    if score >= 5:
         return "High"
-    if score >= 3.0:
+    if score >= 3:
         return "Medium"
     return "Low"
 
@@ -420,7 +619,7 @@ def market_weight(bucket):
         "Spread": 1.20,
         "Total": 1.10,
         "Team Total": 0.85,
-        "Player Prop": 0.55,
+        "Player Prop": 0.60,
         "DFS Prop": 0.35,
         "Other": 0.40,
     }
@@ -442,9 +641,12 @@ def time_penalty(minutes):
 
 
 def book_penalty(book_name):
-    if book_name == "PrizePicks":
-        return -0.6
-    return 0.0
+    return -0.6 if book_name == "PrizePicks" else 0.0
+
+
+def movement_bonus(label):
+    mapping = {"Improving": 0.40, "Flat": 0.0, "Worse": -0.45, "New": 0.10}
+    return mapping.get(label, 0.0)
 
 
 def bet_size_from_score(edge, score, min_bet, max_bet):
@@ -461,36 +663,7 @@ def bet_size_from_score(edge, score, min_bet, max_bet):
     return int(min(max_bet, max(min_bet, 10)))
 
 
-def build_reason(row):
-    parts = []
-
-    if row["Is Best Price"]:
-        parts.append(f"best current price across {int(row['Books Quoting'])} books")
-    else:
-        parts.append(f"positive price edge vs {int(row['Books Quoting'])} book consensus")
-
-    bucket = row["Market Bucket"]
-    if bucket in MAIN_MARKETS:
-        parts.append(f"{bucket.lower()} market carries stronger confidence")
-    elif bucket in PROP_MARKETS:
-        parts.append("prop market keeps stake more conservative")
-
-    mins = row["Minutes To Start"]
-    if mins is not None:
-        if mins >= 180:
-            parts.append("not too close to lock")
-        elif mins >= 60:
-            parts.append("moderate time before start")
-        else:
-            parts.append("close to start, so confidence is reduced")
-
-    if row["Sportsbook"] == "PrizePicks":
-        parts.append("PrizePicks lines are treated more cautiously")
-
-    return " • ".join(parts)
-
-
-def apply_smart_scoring(df, min_bet, max_bet):
+def apply_smart_scoring(df: pd.DataFrame, min_bet: float, max_bet: float) -> pd.DataFrame:
     if df.empty:
         return df
 
@@ -515,11 +688,11 @@ def apply_smart_scoring(df, min_bet, max_bet):
     scored["Edge %"] = (scored["Consensus Prob"] - scored["Implied Prob"]).round(2)
     scored["Best Line Gap %"] = (scored["Worst Price Prob"] - scored["Implied Prob"]).round(2)
     scored["Is Best Price"] = scored["Implied Prob"] <= (scored["Best Price Prob"] + 0.0001)
-
+    scored["Books Bonus"] = scored["Books Quoting"].apply(lambda x: min((x - 1) * 0.55, 2.20))
     scored["Market Weight"] = scored["Market Bucket"].apply(market_weight)
     scored["Time Penalty"] = scored["Minutes To Start"].apply(time_penalty)
     scored["Book Penalty"] = scored["Sportsbook"].apply(book_penalty)
-    scored["Books Bonus"] = scored["Books Quoting"].apply(lambda x: min((x - 1) * 0.55, 2.20))
+    scored["Movement Bonus"] = scored["Movement"].apply(movement_bonus)
 
     scored["Bet Score"] = (
         scored["Edge %"] * 0.95
@@ -528,645 +701,645 @@ def apply_smart_scoring(df, min_bet, max_bet):
         + scored["Market Weight"]
         + scored["Time Penalty"]
         + scored["Book Penalty"]
+        + scored["Movement Bonus"]
     ).round(2)
 
     scored["Confidence"] = scored["Bet Score"].apply(confidence_from_score)
     scored["Recommended Bet"] = scored.apply(
-        lambda row: bet_size_from_score(
-            edge=row["Edge %"],
-            score=row["Bet Score"],
-            min_bet=min_bet,
-            max_bet=max_bet,
-        ),
+        lambda row: bet_size_from_score(row["Edge %"], row["Bet Score"], min_bet, max_bet),
         axis=1,
     )
     scored["Status"] = scored["Recommended Bet"].apply(lambda x: "Bet" if x > 0 else "No Bet")
-    scored["Reason"] = scored.apply(build_reason, axis=1)
-    scored["Market Rank"] = scored["Market Bucket"].apply(market_sort_value)
+
+    def reason(row):
+        parts = []
+        if row["Is Best Price"]:
+            parts.append(f"best current price across {int(row['Books Quoting'])} books")
+        else:
+            parts.append(f"positive edge vs {int(row['Books Quoting'])}-book consensus")
+        parts.append(f"{row['Market Bucket'].lower()} market weight applied")
+        if row["Movement"] == "Improving":
+            parts.append("price moved in your favor")
+        elif row["Movement"] == "Worse":
+            parts.append("price moved against you")
+        if row["Minutes To Start"] is not None and row["Minutes To Start"] < 60:
+            parts.append("close to lock reduced confidence")
+        if row["Sportsbook"] == "PrizePicks":
+            parts.append("PrizePicks handled more conservatively")
+        return " • ".join(parts)
+
+    scored["Reason"] = scored.apply(reason, axis=1)
     return scored
 
 
 # -----------------------------
-# LINE MOVEMENT + RISK CONTROLS
+# EXPOSURE + CORRELATION
 # -----------------------------
-def apply_line_movement(df):
-    if df.empty:
-        return df
-
-    if "line_snapshots" not in st.session_state:
-        st.session_state["line_snapshots"] = {}
-    if "line_histories" not in st.session_state:
-        st.session_state["line_histories"] = {}
-
-    snapshots = st.session_state["line_snapshots"]
-    histories = st.session_state["line_histories"]
-
-    prev_odds = []
-    prev_probs = []
-    move_values = []
-    move_labels = []
-
-    for _, row in df.iterrows():
-        key = row["Row Key"]
-        current_odds = row["Odds"]
-        current_prob = float(row["Implied Prob"])
-        previous = snapshots.get(key)
-
-        if previous is None:
-            prev_odds.append("—")
-            prev_probs.append(None)
-            move_values.append(0.0)
-            move_labels.append("New")
-        else:
-            prev_odds.append(previous.get("odds", "—"))
-            prev_prob = float(previous.get("implied_prob", current_prob))
-            prev_probs.append(prev_prob)
-            move = round(prev_prob - current_prob, 2)
-            move_values.append(move)
-            if move >= 1.0:
-                move_labels.append("Improving")
-            elif move <= -1.0:
-                move_labels.append("Worse")
-            else:
-                move_labels.append("Flat")
-
-        hist = histories.get(key, [])
-        hist = (hist + [current_prob])[-6:]
-        histories[key] = hist
-        snapshots[key] = {"odds": current_odds, "implied_prob": current_prob}
-
-    moved = df.copy()
-    moved["Prev Odds"] = prev_odds
-    moved["Prev Implied Prob"] = prev_probs
-    moved["Line Move %"] = move_values
-    moved["Move Label"] = move_labels
-    moved["Move Favorability"] = moved["Line Move %"].apply(
-        lambda x: "Better Number" if x >= 1.0 else ("Worse Number" if x <= -1.0 else "Little Change")
-    )
-    return moved
-
-
-def build_allocation_note(row, note):
-    base_reason = row.get("Reason", "")
-    if base_reason and note:
-        return f"{base_reason} • {note}"
-    return base_reason or note
-
-
 def apply_risk_controls(
-    df,
-    min_bet,
-    max_total_exposure,
-    max_sport_exposure,
-    max_event_exposure,
-    max_book_exposure,
-    max_prop_exposure,
-    use_correlation_guard,
-):
-    if df.empty:
-        return df
+    df: pd.DataFrame,
+    min_bet: float,
+    max_total_exposure: float,
+    max_sport_exposure: float,
+    max_event_exposure: float,
+    max_book_exposure: float,
+    max_prop_exposure: float,
+    max_event_props: int,
+) -> pd.DataFrame:
+    out = df.copy()
+    out["Final Bet"] = 0
+    out["Final Status"] = "No Bet"
+    out["Allocation Status"] = "Not Qualified"
+    out["Pass Reason"] = ""
 
-    controlled = df.copy()
-    controlled["Final Bet"] = 0
-    controlled["Final Status"] = controlled["Status"]
-    controlled["Allocation Status"] = controlled["Status"].map({"No Bet": "Below Threshold", "Bet": "Pending Review"}).fillna("Below Threshold")
-    controlled["Pass Reason"] = ""
-    controlled["Correlation Flag"] = "Clear"
+    if out.empty:
+        return out
 
     total_used = 0.0
     sport_used = {}
     event_used = {}
     book_used = {}
     prop_used = 0.0
-    main_event_taken = set()
-    prop_event_counts = {}
+    event_main_used = set()
+    event_prop_counts = {}
 
-    candidates = controlled[controlled["Status"] == "Bet"].sort_values(
-        ["Bet Score", "Edge %", "Books Quoting", "Market Rank"],
-        ascending=[False, False, False, True],
+    candidates = out[out["Status"] == "Bet"].sort_values(
+        ["Bet Score", "Edge %", "Books Quoting"],
+        ascending=[False, False, False],
     )
 
     for idx, row in candidates.iterrows():
-        event_id = row["Event ID"]
-        sport = row["Sport"]
-        book = row["Sportsbook"]
-        bucket = row["Market Bucket"]
-        recommended = float(row["Recommended Bet"])
-        note_parts = []
-
-        if use_correlation_guard:
-            if bucket in MAIN_MARKETS and event_id in main_event_taken:
-                controlled.at[idx, "Final Status"] = "Pass"
-                controlled.at[idx, "Allocation Status"] = "Correlation Pass"
-                controlled.at[idx, "Pass Reason"] = build_allocation_note(row, "same-event main market already selected")
-                controlled.at[idx, "Correlation Flag"] = "Blocked"
-                continue
-
-            if bucket in PROP_MARKETS and prop_event_counts.get(event_id, 0) >= 2:
-                controlled.at[idx, "Final Status"] = "Pass"
-                controlled.at[idx, "Allocation Status"] = "Correlation Pass"
-                controlled.at[idx, "Pass Reason"] = build_allocation_note(row, "too many correlated props already selected in same event")
-                controlled.at[idx, "Correlation Flag"] = "Blocked"
-                continue
-
-        remaining_total = max_total_exposure - total_used
-        remaining_sport = max_sport_exposure - sport_used.get(sport, 0.0)
-        remaining_event = max_event_exposure - event_used.get(event_id, 0.0)
-        remaining_book = max_book_exposure - book_used.get(book, 0.0)
-        remaining_prop = max_prop_exposure - prop_used if bucket in PROP_MARKETS else float("inf")
-
-        alloc = min(recommended, remaining_total, remaining_sport, remaining_event, remaining_book, remaining_prop)
-        alloc = int(max(0, alloc))
-
-        if alloc < min_bet:
-            controlled.at[idx, "Final Status"] = "Pass"
-            controlled.at[idx, "Allocation Status"] = "Exposure Pass"
-            reasons = []
-            if remaining_total < min_bet:
-                reasons.append("total exposure cap reached")
-            if remaining_sport < min_bet:
-                reasons.append("sport cap reached")
-            if remaining_event < min_bet:
-                reasons.append("event cap reached")
-            if remaining_book < min_bet:
-                reasons.append("sportsbook cap reached")
-            if bucket in PROP_MARKETS and remaining_prop < min_bet:
-                reasons.append("prop cap reached")
-            reason_text = ", ".join(reasons) if reasons else "allocation rules blocked this play"
-            controlled.at[idx, "Pass Reason"] = build_allocation_note(row, reason_text)
+        suggested = float(row["Recommended Bet"])
+        if suggested < min_bet:
+            out.at[idx, "Final Status"] = "Pass"
+            out.at[idx, "Allocation Status"] = "Below Minimum"
+            out.at[idx, "Pass Reason"] = "Recommended size below minimum"
             continue
 
-        controlled.at[idx, "Final Bet"] = alloc
-        controlled.at[idx, "Final Status"] = "Bet"
-        controlled.at[idx, "Allocation Status"] = "Trimmed" if alloc < recommended else "Within Limits"
-        if alloc < recommended:
-            note_parts.append("stake trimmed by exposure rules")
+        event_id = str(row["Event ID"])
+        sport = str(row["Sport"])
+        book = str(row["Sportsbook"])
+        market_bucket = str(row["Market Bucket"])
+        is_prop = market_bucket in {"Player Prop", "DFS Prop"}
 
-        total_used += alloc
-        sport_used[sport] = sport_used.get(sport, 0.0) + alloc
-        event_used[event_id] = event_used.get(event_id, 0.0) + alloc
-        book_used[book] = book_used.get(book, 0.0) + alloc
-        if bucket in PROP_MARKETS:
-            prop_used += alloc
-            prop_event_counts[event_id] = prop_event_counts.get(event_id, 0) + 1
-        if bucket in MAIN_MARKETS:
-            main_event_taken.add(event_id)
+        if total_used + min_bet > max_total_exposure:
+            out.at[idx, "Final Status"] = "Pass"
+            out.at[idx, "Allocation Status"] = "Exposure Cap"
+            out.at[idx, "Pass Reason"] = "Max total exposure reached"
+            continue
 
-        controlled.at[idx, "Pass Reason"] = build_allocation_note(row, " • ".join(note_parts))
+        if sport_used.get(sport, 0.0) + min_bet > max_sport_exposure:
+            out.at[idx, "Final Status"] = "Pass"
+            out.at[idx, "Allocation Status"] = "Sport Cap"
+            out.at[idx, "Pass Reason"] = f"Max exposure reached for {sport}"
+            continue
 
-    return controlled
+        if event_used.get(event_id, 0.0) + min_bet > max_event_exposure:
+            out.at[idx, "Final Status"] = "Pass"
+            out.at[idx, "Allocation Status"] = "Event Cap"
+            out.at[idx, "Pass Reason"] = "Max exposure reached for this event"
+            continue
 
+        if book_used.get(book, 0.0) + min_bet > max_book_exposure:
+            out.at[idx, "Final Status"] = "Pass"
+            out.at[idx, "Allocation Status"] = "Book Cap"
+            out.at[idx, "Pass Reason"] = f"Max exposure reached for {book}"
+            continue
 
-# -----------------------------
-# STYLING
-# -----------------------------
-st.markdown(
-    """
-    <style>
-    .stApp {
-        background: linear-gradient(180deg, #f5f8fc 0%, #edf3fb 100%);
-        color: #142235;
-    }
+        if is_prop and prop_used + min_bet > max_prop_exposure:
+            out.at[idx, "Final Status"] = "Pass"
+            out.at[idx, "Allocation Status"] = "Prop Cap"
+            out.at[idx, "Pass Reason"] = "Max prop exposure reached"
+            continue
 
-    section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #edf5ff 0%, #e1ecfb 100%);
-        border-right: 1px solid #c8d8ee;
-    }
+        if market_bucket in {"Moneyline", "Spread", "Total", "Team Total"}:
+            if event_id in event_main_used:
+                out.at[idx, "Final Status"] = "Pass"
+                out.at[idx, "Allocation Status"] = "Correlation Pass"
+                out.at[idx, "Pass Reason"] = "Correlated main-market bet already selected in this event"
+                continue
 
-    .main-title {
-        font-size: 2.8rem;
-        font-weight: 800;
-        color: #163b68;
-        margin-bottom: 0.2rem;
-    }
+        if is_prop and event_prop_counts.get(event_id, 0) >= max_event_props:
+            out.at[idx, "Final Status"] = "Pass"
+            out.at[idx, "Allocation Status"] = "Correlation Pass"
+            out.at[idx, "Pass Reason"] = "Too many props already selected in this event"
+            continue
 
-    .sub-title {
-        font-size: 1rem;
-        color: #476383;
-        margin-bottom: 1.0rem;
-    }
+        remaining_limits = [
+            max_total_exposure - total_used,
+            max_sport_exposure - sport_used.get(sport, 0.0),
+            max_event_exposure - event_used.get(event_id, 0.0),
+            max_book_exposure - book_used.get(book, 0.0),
+        ]
+        if is_prop:
+            remaining_limits.append(max_prop_exposure - prop_used)
 
-    .hero-box {
-        background: linear-gradient(135deg, #ffffff 0%, #f6fbff 100%);
-        border: 1px solid #cfe0f5;
-        border-radius: 18px;
-        padding: 20px 24px;
-        margin-bottom: 18px;
-        box-shadow: 0 10px 24px rgba(25, 60, 110, 0.10);
-    }
+        final_size = int(min(suggested, *remaining_limits))
+        if final_size < min_bet:
+            out.at[idx, "Final Status"] = "Pass"
+            out.at[idx, "Allocation Status"] = "Trimmed Out"
+            out.at[idx, "Pass Reason"] = "Risk controls trimmed this bet below minimum size"
+            continue
 
-    .card {
-        background: #ffffff;
-        border: 1px solid #d8e6f7;
-        border-radius: 18px;
-        padding: 18px;
-        box-shadow: 0 8px 22px rgba(16, 46, 80, 0.08);
-        margin-bottom: 16px;
-    }
+        out.at[idx, "Final Bet"] = final_size
+        out.at[idx, "Final Status"] = "Bet"
+        out.at[idx, "Allocation Status"] = "Trimmed" if final_size < suggested else "Approved"
 
-    .best-bet {
-        background: linear-gradient(135deg, #f8fbff 0%, #eef6ff 100%);
-        border: 1px solid #bdd5f1;
-        border-left: 6px solid #2b73d5;
-        border-radius: 18px;
-        padding: 18px;
-        box-shadow: 0 8px 22px rgba(16, 46, 80, 0.08);
-        margin-bottom: 16px;
-    }
-
-    .section-title {
-        font-size: 1.3rem;
-        font-weight: 800;
-        color: #173b67;
-        margin-top: 8px;
-        margin-bottom: 10px;
-    }
-
-    .small-label {
-        color: #5e7898;
-        font-size: 0.88rem;
-        font-weight: 600;
-    }
-
-    .big-value {
-        color: #173b67;
-        font-size: 1.55rem;
-        font-weight: 900;
-    }
-
-    .kpi-card {
-        background: linear-gradient(180deg, #ffffff 0%, #f6fbff 100%);
-        border: 1px solid #d8e6f7;
-        border-top: 4px solid #2b73d5;
-        border-radius: 16px;
-        padding: 14px 16px;
-        box-shadow: 0 8px 18px rgba(16, 46, 80, 0.07);
-        margin-bottom: 8px;
-    }
-
-    .kpi-label {
-        color: #5f7b9a;
-        font-size: 0.82rem;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: .3px;
-    }
-
-    .kpi-value {
-        color: #163b68;
-        font-size: 1.35rem;
-        font-weight: 900;
-        margin-top: 6px;
-    }
-
-    .pill {
-        display: inline-block;
-        background: #eaf3ff;
-        color: #174272;
-        border: 1px solid #c6dbf4;
-        border-radius: 999px;
-        padding: 4px 10px;
-        font-size: 0.8rem;
-        font-weight: 700;
-        margin-right: 6px;
-        margin-top: 6px;
-    }
-
-    div[data-baseweb="select"] > div,
-    div[data-baseweb="base-input"] > div {
-        color: black !important;
-        background: #FFFFFF !important;
-    }
-
-    div[data-baseweb="select"] input,
-    div[data-baseweb="base-input"] input {
-        color: black !important;
-    }
-
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-    }
-
-    .stTabs [data-baseweb="tab"] {
-        background: rgba(255,255,255,0.82);
-        border: 1px solid #d5e4f5;
-        border-radius: 12px;
-        color: #173b67;
-        padding: 10px 14px;
-        font-weight: 700;
-    }
-
-    .stTabs [aria-selected="true"] {
-        background: #dfeeff !important;
-        color: #163b68 !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# -----------------------------
-# SIDEBAR
-# -----------------------------
-st.sidebar.title("⚙️ Dashboard Controls")
-
-bankroll = st.sidebar.number_input("Bankroll", min_value=1.0, value=500.0, step=25.0)
-min_bet = st.sidebar.number_input("Minimum Bet", min_value=1.0, value=1.0, step=1.0)
-max_bet = st.sidebar.number_input("Maximum Bet", min_value=1.0, value=10.0, step=1.0)
-
-league_filter = st.sidebar.multiselect(
-    "Leagues",
-    options=DEFAULT_LEAGUES,
-    default=DEFAULT_LEAGUES,
-)
-
-book_filter = st.sidebar.multiselect(
-    "Sportsbooks",
-    options=["DraftKings", "FanDuel", "Bet365", "PrizePicks"],
-    default=["DraftKings", "FanDuel", "Bet365", "PrizePicks"],
-)
-
-max_total_exposure = st.sidebar.number_input("Max Total Exposure", min_value=1.0, value=30.0, step=1.0)
-max_sport_exposure = st.sidebar.number_input("Max Exposure per Sport", min_value=1.0, value=12.0, step=1.0)
-max_event_exposure = st.sidebar.number_input("Max Exposure per Event", min_value=1.0, value=8.0, step=1.0)
-max_book_exposure = st.sidebar.number_input("Max Exposure per Sportsbook", min_value=1.0, value=12.0, step=1.0)
-max_prop_exposure = st.sidebar.number_input("Max Exposure on Props", min_value=1.0, value=8.0, step=1.0)
-correlation_guard = st.sidebar.toggle("Correlation Protection", value=True)
-watchlist_query = st.sidebar.text_input("Watchlist filter", placeholder="Knicks, LeBron, totals, Braves...")
-watchlist_only = st.sidebar.toggle("Show watchlist matches only", value=False)
-only_final_bets = st.sidebar.toggle("Show final bets only", value=False)
-
-if st.sidebar.button("Refresh now"):
-    st.cache_data.clear()
-    st.rerun()
-
-st.markdown('<div class="main-title">🏈 Sports Betting Dashboard</div>', unsafe_allow_html=True)
-st.markdown(
-    '<div class="sub-title">Lighter look, sharper controls, line movement tracking, and smarter risk allocation built on your stable version.</div>',
-    unsafe_allow_html=True,
-)
-
-render_quick_links()
-
-# -----------------------------
-# LIVE DASHBOARD
-# -----------------------------
-@st.fragment(run_every="15m")
-def render_live_dashboard():
-    events, error_message = fetch_events(league_filter)
-
-    if error_message:
-        st.warning(error_message)
-        st.info("Add SPORTS_GAME_ODDS_API_KEY in Streamlit Secrets and click Refresh now.")
-        return
-
-    raw_df = flatten_events_to_rows(events)
-    if raw_df.empty:
-        st.warning("No live odds came back for the leagues selected.")
-        return
-
-    scored_df = apply_smart_scoring(raw_df, min_bet=min_bet, max_bet=max_bet)
-    moved_df = apply_line_movement(scored_df)
-    filtered_df = moved_df[moved_df["Sportsbook"].isin(book_filter)].copy()
-    filtered_df = apply_risk_controls(
-        filtered_df,
-        min_bet=min_bet,
-        max_total_exposure=max_total_exposure,
-        max_sport_exposure=max_sport_exposure,
-        max_event_exposure=max_event_exposure,
-        max_book_exposure=max_book_exposure,
-        max_prop_exposure=max_prop_exposure,
-        use_correlation_guard=correlation_guard,
-    )
-
-    filtered_df["Watchlist Match"] = filtered_df.apply(lambda row: watchlist_match(row, watchlist_query), axis=1)
-    filtered_df["Watchlist Label"] = filtered_df["Watchlist Match"].map({True: "⭐ Watchlist", False: ""})
-
-    if watchlist_only and str(watchlist_query).strip():
-        filtered_df = filtered_df[filtered_df["Watchlist Match"]].copy()
-
-    if only_final_bets:
-        filtered_df = filtered_df[filtered_df["Final Status"] == "Bet"].copy()
-
-    status_order = {"Bet": 2, "Pass": 1, "No Bet": 0}
-    filtered_df["Status Rank"] = filtered_df["Final Status"].map(status_order).fillna(0)
-    filtered_df = filtered_df.sort_values(
-        ["Status Rank", "Bet Score", "Edge %", "Books Quoting", "Market Rank"],
-        ascending=[False, False, False, False, True],
-    )
-
-    live_bets = filtered_df[filtered_df["Final Status"] == "Bet"].copy()
-    best_row = live_bets.iloc[0] if not live_bets.empty else None
-    best_edge = float(live_bets["Edge %"].max()) if not live_bets.empty else 0.0
-    avg_edge = float(live_bets["Edge %"].mean()) if not live_bets.empty else 0.0
-    avg_score = float(live_bets["Bet Score"].mean()) if not live_bets.empty else 0.0
-    open_risk = int(live_bets["Final Bet"].sum()) if not live_bets.empty else 0
-    active_bets = int(len(live_bets))
-    refresh_time = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
-    strong_alerts = strong_shop_alerts(live_bets)
-    avg_books = float(live_bets["Books Quoting"].mean()) if not live_bets.empty else 0.0
-    improving_count = int((live_bets["Move Label"] == "Improving").sum()) if not live_bets.empty else 0
-    watchlist_hits = int(filtered_df["Watchlist Match"].sum()) if "Watchlist Match" in filtered_df.columns else 0
-
-    exposure_by_sport = live_bets.groupby("Sport")["Final Bet"].sum().sort_values(ascending=False) if not live_bets.empty else pd.Series(dtype=float)
-    exposure_by_book = live_bets.groupby("Sportsbook")["Final Bet"].sum().sort_values(ascending=False) if not live_bets.empty else pd.Series(dtype=float)
-
-    st.markdown('<div class="hero-box">', unsafe_allow_html=True)
-    hero_left, hero_right = st.columns([2, 1])
-
-    with hero_left:
-        st.markdown("### Current Top Bet")
-        if best_row is not None:
-            pills = build_badges_html(best_row)
-            st.markdown(
-                f"""
-                **{best_row['Pick']}**  
-                {best_row['Event']} · {best_row['Market']}  
-                Book: **{best_row['Sportsbook']}** · Odds: **{best_row['Odds']}** · Previous: **{best_row['Prev Odds']}**  
-                Edge: **{best_row['Edge %']:.2f}%** · Score: **{best_row['Bet Score']:.2f}** · Final Bet: **${int(best_row['Final Bet'])}**  
-                Line Move: **{best_row['Line Move %']:+.2f}%** · Time To Start: **{format_minutes(best_row['Minutes To Start'])}**  
-                Reason: *{best_row['Pass Reason'] or best_row['Reason']}*  
-                {pills}
-                """,
-                unsafe_allow_html=True,
-            )
-            if best_row["Link"]:
-                st.markdown(f"[Open bet page]({best_row['Link']})")
+        total_used += final_size
+        sport_used[sport] = sport_used.get(sport, 0.0) + final_size
+        event_used[event_id] = event_used.get(event_id, 0.0) + final_size
+        book_used[book] = book_used.get(book, 0.0) + final_size
+        if is_prop:
+            prop_used += final_size
+            event_prop_counts[event_id] = event_prop_counts.get(event_id, 0) + 1
         else:
-            st.info("No bets qualify right now under the current rules.")
+            event_main_used.add(event_id)
 
-    with hero_right:
-        st.markdown('<div class="small-label">Current Bankroll</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="big-value">${bankroll:,.2f}</div>', unsafe_allow_html=True)
-        st.markdown('<div class="small-label">Bet Range</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="big-value">${min_bet:.0f} - ${max_bet:.0f}</div>', unsafe_allow_html=True)
-        st.markdown('<div class="small-label">Refresh</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="big-value" style="font-size:1.0rem;">{refresh_time}</div>', unsafe_allow_html=True)
+    return out.sort_values(
+        ["Final Status", "Bet Score", "Edge %"],
+        ascending=[False, False, False],
+    ).reset_index(drop=True)
 
-    st.markdown("</div>", unsafe_allow_html=True)
 
-    def kpi_card(label, value):
-        st.markdown(
-            f'<div class="kpi-card"><div class="kpi-label">{label}</div><div class="kpi-value">{value}</div></div>',
-            unsafe_allow_html=True,
+# -----------------------------
+# COMPARE LINES
+# -----------------------------
+def build_compare_lines(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
+
+    group_cols = ["Event ID", "Odd ID", "Sport", "Event", "Market Bucket", "Market", "Pick"]
+
+    pivot_df = (
+        df.pivot_table(index=group_cols, columns="Sportsbook", values="Odds", aggfunc="first")
+        .reset_index()
+    )
+
+    best_rows = df.loc[df.groupby(["Event ID", "Odd ID"])["Implied Prob"].idxmin()].copy()
+    best_rows = best_rows.rename(
+        columns={
+            "Sportsbook": "Best Book",
+            "Odds": "Best Odds",
+            "Final Bet": "Best Final Bet",
+            "Final Status": "Best Final Status",
+            "Confidence": "Best Confidence",
+            "Bet Score": "Best Score",
+            "Link": "Best Link",
+            "Reason": "Best Reason",
+        }
+    )[
+        [
+            "Event ID",
+            "Odd ID",
+            "Best Book",
+            "Best Odds",
+            "Best Final Bet",
+            "Best Final Status",
+            "Best Confidence",
+            "Best Score",
+            "Best Link",
+            "Best Reason",
+        ]
+    ]
+
+    price_stats = (
+        df.groupby(group_cols)["Implied Prob"]
+        .agg(["min", "max", "count"])
+        .reset_index()
+        .rename(columns={"min": "Best Price Prob", "max": "Worst Price Prob", "count": "Books Quoting"})
+    )
+    price_stats["Line Gap %"] = (price_stats["Worst Price Prob"] - price_stats["Best Price Prob"]).round(2)
+
+    compare = pivot_df.merge(price_stats, on=group_cols, how="left").merge(best_rows, on=["Event ID", "Odd ID"], how="left")
+    for book_name in BOOK_URLS:
+        if book_name not in compare.columns:
+            compare[book_name] = ""
+
+    def shop_alert(row):
+        if row["Books Quoting"] >= 3 and row["Line Gap %"] >= 4:
+            return "Strong Shop"
+        if row["Books Quoting"] >= 2 and row["Line Gap %"] >= 2:
+            return "Good Shop"
+        if row["Line Gap %"] > 0:
+            return "Small Edge"
+        return "Flat"
+
+    compare["Shop Alert"] = compare.apply(shop_alert, axis=1)
+    return compare.sort_values(["Best Score", "Line Gap %"], ascending=[False, False]).reset_index(drop=True)
+
+
+# -----------------------------
+# WATCHLIST
+# -----------------------------
+def apply_watchlist_labels(df: pd.DataFrame, watchlist_terms: list[str]) -> pd.DataFrame:
+    out = df.copy()
+    if not watchlist_terms:
+        out["Watchlist Match"] = ""
+        return out
+
+    def match_row(row):
+        haystack = f"{row['Sport']} {row['Event']} {row['Pick']} {row['Market']}".lower()
+        matches = [term for term in watchlist_terms if term and term in haystack]
+        return ", ".join(matches[:3])
+
+    out["Watchlist Match"] = out.apply(match_row, axis=1)
+    return out
+
+
+# -----------------------------
+# BET LOGGING
+# -----------------------------
+def log_bet_from_row(row: pd.Series):
+    log_df = load_bet_log()
+    duplicate_mask = (
+        (log_df["Event"].astype(str) == str(row["Event"]))
+        & (log_df["Pick"].astype(str) == str(row["Pick"]))
+        & (log_df["Sportsbook"].astype(str) == str(row["Sportsbook"]))
+        & (log_df["Odds"].astype(str) == str(row["Odds"]))
+        & (log_df["Bet Status"].astype(str) == "Pending")
+    )
+    if duplicate_mask.any():
+        return False, "That bet is already logged as pending."
+
+    bet_id = str(uuid.uuid4())[:8].upper()
+    new_row = {
+        "Bet ID": bet_id,
+        "Logged At": datetime.now().strftime("%Y-%m-%d %I:%M:%S %p"),
+        "Settled At": "",
+        "Sport": row["Sport"],
+        "Event": row["Event"],
+        "Event ID": row["Event ID"],
+        "Odd ID": row["Odd ID"],
+        "Market Bucket": row["Market Bucket"],
+        "Market": row["Market"],
+        "Pick": row["Pick"],
+        "Sportsbook": row["Sportsbook"],
+        "Odds": row["Odds"],
+        "Stake": float(row["Final Bet"]),
+        "Implied Prob": float(row["Implied Prob"]),
+        "Model Prob": float(row["Model Prob"]),
+        "Edge %": float(row["Edge %"]),
+        "Bet Score": float(row["Bet Score"]),
+        "Confidence": row["Confidence"],
+        "Reason": row["Reason"],
+        "Start Time": row["Start Time"],
+        "Link": row["Link"],
+        "Bet Status": "Pending",
+        "Result": "",
+        "PNL": 0.0,
+    }
+    log_df = pd.concat([log_df, pd.DataFrame([new_row])], ignore_index=True)
+    save_bet_log(log_df)
+    return True, f"Bet logged successfully. Bet ID: {bet_id}"
+
+
+def settle_bet(bet_id: str, result: str):
+    log_df = load_bet_log()
+    if log_df.empty:
+        return False, "No bet history found."
+
+    mask = log_df["Bet ID"].astype(str) == str(bet_id)
+    if not mask.any():
+        return False, "Bet ID not found."
+
+    idx = log_df.index[mask][0]
+    stake = float(log_df.at[idx, "Stake"])
+    odds = str(log_df.at[idx, "Odds"])
+
+    if result == "Win":
+        pnl = american_profit(odds, stake)
+    elif result == "Loss":
+        pnl = round(-stake, 2)
+    else:
+        pnl = 0.0
+
+    log_df.at[idx, "Result"] = result
+    log_df.at[idx, "PNL"] = pnl
+    log_df.at[idx, "Bet Status"] = "Settled"
+    log_df.at[idx, "Settled At"] = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
+    save_bet_log(log_df)
+    return True, f"Bet {bet_id} settled as {result}. PNL: ${pnl:,.2f}"
+
+
+# -----------------------------
+# OPENAI ASSISTANT
+# -----------------------------
+def call_openai_assistant(user_prompt: str, context_text: str) -> str:
+    api_key = st.secrets.get("OPENAI_API_KEY", "")
+    model = st.secrets.get("OPENAI_MODEL", "gpt-4.1-mini")
+
+    if not api_key:
+        return "Add OPENAI_API_KEY to Streamlit secrets to use the AI assistant."
+
+    system_prompt = (
+        "You are an assistant inside a sports betting dashboard. "
+        "Be practical, concise, and risk-aware. Do not promise wins. "
+        "Use the supplied dashboard context only. "
+        "Explain edge, confidence, sportsbook value, and bankroll discipline clearly."
+    )
+
+    payload = {
+        "model": model,
+        "input": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"DASHBOARD CONTEXT:\n{context_text}\n\nUSER REQUEST:\n{user_prompt}"},
+        ],
+    }
+
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=45,
         )
+        response.raise_for_status()
+        data = response.json()
 
-    k1, k2, k3, k4, k5, k6, k7, k8 = st.columns(8)
-    with k1:
-        kpi_card("Final Bets", active_bets)
-    with k2:
-        kpi_card("Best Edge", f"{best_edge:.2f}%")
-    with k3:
-        kpi_card("Average Edge", f"{avg_edge:.2f}%")
-    with k4:
-        kpi_card("Average Score", f"{avg_score:.2f}")
-    with k5:
-        kpi_card("Open Risk", f"${open_risk}")
-    with k6:
-        kpi_card("Strong Shop", strong_alerts)
-    with k7:
-        kpi_card("Improving Lines", improving_count)
-    with k8:
-        kpi_card("Watchlist Hits", watchlist_hits)
+        if isinstance(data.get("output_text"), str) and data.get("output_text").strip():
+            return data["output_text"].strip()
 
-    tabs = st.tabs([
-        "Home",
+        pieces = []
+        for item in data.get("output", []):
+            for content in item.get("content", []):
+                if content.get("type") == "output_text":
+                    pieces.append(content.get("text", ""))
+        text = "\n".join(piece for piece in pieces if piece).strip()
+        return text or "The AI assistant returned an empty response."
+    except Exception as exc:
+        return f"AI request failed: {exc}"
+
+
+def summarize_dashboard_context(df: pd.DataFrame, compare_df: pd.DataFrame) -> str:
+    if df.empty:
+        return "No live rows are currently available."
+
+    final_bets = df[df["Final Status"] == "Bet"].copy().head(8)
+    lines = []
+    lines.append(f"Total live rows: {len(df)}")
+    lines.append(f"Final bets: {len(df[df['Final Status'] == 'Bet'])}")
+    lines.append(f"Strong shop alerts: {len(compare_df[compare_df['Shop Alert'] == 'Strong Shop']) if not compare_df.empty else 0}")
+    for _, row in final_bets.iterrows():
+        lines.append(
+            f"- {row['Sport']} | {row['Event']} | {row['Pick']} | {row['Sportsbook']} {row['Odds']} | "
+            f"Edge {row['Edge %']:.2f}% | Score {row['Bet Score']:.2f} | Final Bet ${int(row['Final Bet'])} | "
+            f"Movement {row['Movement']} | Reason: {row['Reason']}"
+        )
+    return "\n".join(lines)
+
+
+# -----------------------------
+# MAIN PIPELINE
+# -----------------------------
+st.markdown('<div class="main-title">Sports Betting Dashboard</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="sub-title">Cleaner look, sharper controls, compare-lines workflow, tracking, results, bankroll, and optional AI help.</div>',
+    unsafe_allow_html=True,
+)
+
+with st.sidebar:
+    st.markdown("### Controls")
+    bankroll = st.number_input("Starting Bankroll", min_value=1.0, value=500.0, step=25.0, key="sb_bankroll")
+    min_bet = st.number_input("Minimum Bet", min_value=1.0, value=1.0, step=1.0, key="sb_min_bet")
+    max_bet = st.number_input("Maximum Bet", min_value=1.0, value=10.0, step=1.0, key="sb_max_bet")
+
+    st.markdown("### Risk Controls")
+    max_total_exposure = st.number_input("Max Total Exposure", min_value=1.0, value=40.0, step=5.0, key="sb_total_exp")
+    max_sport_exposure = st.number_input("Max Exposure Per Sport", min_value=1.0, value=20.0, step=1.0, key="sb_sport_exp")
+    max_event_exposure = st.number_input("Max Exposure Per Event", min_value=1.0, value=10.0, step=1.0, key="sb_event_exp")
+    max_book_exposure = st.number_input("Max Exposure Per Sportsbook", min_value=1.0, value=15.0, step=1.0, key="sb_book_exp")
+    max_prop_exposure = st.number_input("Max Prop Exposure", min_value=1.0, value=12.0, step=1.0, key="sb_prop_exp")
+    max_event_props = st.number_input("Max Props Per Event", min_value=1, value=2, step=1, key="sb_event_props")
+
+    st.markdown("### Filters")
+    league_filter = st.multiselect("Leagues", options=DEFAULT_LEAGUES, default=DEFAULT_LEAGUES, key="sb_leagues")
+    book_filter = st.multiselect(
+        "Sportsbooks",
+        options=list(BOOK_URLS.keys()),
+        default=list(BOOK_URLS.keys()),
+        key="sb_books",
+    )
+    market_filter = st.multiselect(
+        "Market Types",
+        options=["Moneyline", "Spread", "Total", "Team Total", "Player Prop", "DFS Prop", "Other"],
+        default=["Moneyline", "Spread", "Total", "Team Total", "Player Prop", "DFS Prop", "Other"],
+        key="sb_markets",
+    )
+    confidence_filter = st.multiselect(
+        "Confidence",
+        options=["Elite", "High", "Medium", "Low"],
+        default=["Elite", "High", "Medium", "Low"],
+        key="sb_conf",
+    )
+    watchlist_text = st.text_input(
+        "Watchlist Terms",
+        value="",
+        help="Comma-separated teams, players, or keywords.",
+        key="sb_watchlist_terms",
+    )
+    only_final_bets = st.toggle("Show final bets only", value=False, key="sb_only_final")
+    if st.button("Refresh Data", key="sb_refresh"):
+        st.cache_data.clear()
+        st.rerun()
+
+watchlist_terms = [term.strip().lower() for term in watchlist_text.split(",") if term.strip()]
+
+events, fetch_error = fetch_events(league_filter)
+if fetch_error:
+    st.warning(fetch_error)
+    st.stop()
+
+raw_df = flatten_events_to_rows(events)
+if raw_df.empty:
+    st.warning("No live odds came back for the selected leagues.")
+    st.stop()
+
+tracked_df = update_snapshot_tracking(raw_df)
+scored_df = apply_smart_scoring(tracked_df, min_bet=min_bet, max_bet=max_bet)
+
+filtered_df = scored_df[
+    scored_df["Sportsbook"].isin(book_filter)
+    & scored_df["Market Bucket"].isin(market_filter)
+    & scored_df["Confidence"].isin(confidence_filter)
+].copy()
+
+controlled_df = apply_risk_controls(
+    filtered_df,
+    min_bet=min_bet,
+    max_total_exposure=max_total_exposure,
+    max_sport_exposure=max_sport_exposure,
+    max_event_exposure=max_event_exposure,
+    max_book_exposure=max_book_exposure,
+    max_prop_exposure=max_prop_exposure,
+    max_event_props=max_event_props,
+)
+
+controlled_df = apply_watchlist_labels(controlled_df, watchlist_terms)
+
+if only_final_bets:
+    display_df = controlled_df[controlled_df["Final Status"] == "Bet"].copy()
+else:
+    display_df = controlled_df.copy()
+
+display_df = display_df.reset_index(drop=True)
+compare_df = build_compare_lines(controlled_df)
+
+bet_log_df = load_bet_log()
+pending_df = bet_log_df[bet_log_df["Bet Status"] == "Pending"].copy()
+settled_df = bet_log_df[bet_log_df["Bet Status"] == "Settled"].copy()
+graded_df = settled_df[settled_df["Result"].isin(["Win", "Loss"])].copy()
+
+realized_pnl = float(settled_df["PNL"].sum()) if not settled_df.empty else 0.0
+current_bankroll = bankroll + realized_pnl
+open_logged_risk = float(pending_df["Stake"].sum()) if not pending_df.empty else 0.0
+open_live_risk = float(controlled_df[controlled_df["Final Status"] == "Bet"]["Final Bet"].sum()) if not controlled_df.empty else 0.0
+roi = (realized_pnl / float(settled_df["Stake"].sum()) * 100) if not settled_df.empty and float(settled_df["Stake"].sum()) > 0 else 0.0
+win_rate = ((graded_df["Result"] == "Win").mean() * 100) if not graded_df.empty else 0.0
+strong_shop_alerts = int((compare_df["Shop Alert"] == "Strong Shop").sum()) if not compare_df.empty else 0
+final_bets_count = int((controlled_df["Final Status"] == "Bet").sum()) if not controlled_df.empty else 0
+avg_edge = float(controlled_df[controlled_df["Final Status"] == "Bet"]["Edge %"].mean()) if final_bets_count else 0.0
+avg_score = float(controlled_df[controlled_df["Final Status"] == "Bet"]["Bet Score"].mean()) if final_bets_count else 0.0
+
+top_bet_row = None
+top_bets_df = controlled_df[controlled_df["Final Status"] == "Bet"].copy()
+if not top_bets_df.empty:
+    top_bet_row = top_bets_df.sort_values(["Bet Score", "Edge %"], ascending=[False, False]).iloc[0]
+
+kpi_html = f"""
+<div class="kpi-grid">
+  <div class="kpi-card"><div class="kpi-label">Current Bankroll</div><div class="kpi-value">${current_bankroll:,.2f}</div></div>
+  <div class="kpi-card"><div class="kpi-label">Realized P/L</div><div class="kpi-value">${realized_pnl:,.2f}</div></div>
+  <div class="kpi-card"><div class="kpi-label">ROI</div><div class="kpi-value">{roi:.1f}%</div></div>
+  <div class="kpi-card"><div class="kpi-label">Win Rate</div><div class="kpi-value">{win_rate:.1f}%</div></div>
+  <div class="kpi-card"><div class="kpi-label">Open Live Risk</div><div class="kpi-value">${open_live_risk:,.0f}</div></div>
+  <div class="kpi-card"><div class="kpi-label">Final Bets</div><div class="kpi-value">{final_bets_count}</div></div>
+  <div class="kpi-card"><div class="kpi-label">Strong Shop Alerts</div><div class="kpi-value">{strong_shop_alerts}</div></div>
+  <div class="kpi-card"><div class="kpi-label">Average Edge / Score</div><div class="kpi-value">{avg_edge:.2f}% / {avg_score:.2f}</div></div>
+</div>
+"""
+st.markdown(kpi_html, unsafe_allow_html=True)
+
+st.markdown('<div class="hero-box">', unsafe_allow_html=True)
+hero_left, hero_right = st.columns([2, 1])
+
+with hero_left:
+    st.markdown("### Current Top Bet")
+    if top_bet_row is not None:
+        st.markdown(
+            f"""
+            **{top_bet_row['Pick']}**  
+            {top_bet_row['Event']} · {top_bet_row['Market']}  
+            Book: **{top_bet_row['Sportsbook']}** · Odds: **{top_bet_row['Odds']}**  
+            Edge: **{top_bet_row['Edge %']:.2f}%** · Score: **{top_bet_row['Bet Score']:.2f}** · Confidence: **{top_bet_row['Confidence']}**  
+            Final Bet: **${int(top_bet_row['Final Bet'])}** · Movement: **{top_bet_row['Movement']}**  
+            Reason: *{top_bet_row['Reason']}*
+            """
+        )
+        if top_bet_row.get("Link"):
+            st.markdown(f"[Open at sportsbook]({top_bet_row['Link']})")
+    else:
+        st.info("No final bets qualify under the current rules.")
+
+with hero_right:
+    st.markdown(
+        """
+        <div class="soft-card">
+        <b>Quick sports links</b><br><br>
+        <a href="https://sportsbook.draftkings.com/" target="_blank">DraftKings</a><br>
+        <a href="https://sportsbook.fanduel.com/" target="_blank">FanDuel</a><br>
+        <a href="https://www.bet365.com/" target="_blank">Bet365</a><br>
+        <a href="https://app.prizepicks.com/" target="_blank">PrizePicks</a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+st.markdown("</div>", unsafe_allow_html=True)
+
+tabs = st.tabs(
+    [
+        "Overview",
         "Best Bets",
+        "Compare Lines",
+        "Quick Links",
         "DraftKings",
         "FanDuel",
         "Bet365",
         "PrizePicks",
+        "AI Assistant",
+        "Tracker",
+        "Results",
         "Bankroll",
-    ])
+    ]
+)
 
-    with tabs[0]:
-        top_left, top_right = st.columns([1.35, 1])
+# -----------------------------
+# OVERVIEW
+# -----------------------------
+with tabs[0]:
+    col1, col2 = st.columns([1.25, 1])
 
-        with top_left:
-            st.markdown('<div class="section-title">Top Final Bets</div>', unsafe_allow_html=True)
-            top_df = live_bets.head(3)
-            if top_df.empty:
-                st.warning("No final bets available right now.")
-            else:
-                for _, row in top_df.iterrows():
-                    link_html = f'<br><a href="{row["Link"]}" target="_blank">Open bet page</a>' if row["Link"] else ""
-                    st.markdown(
-                        f"""
-                        <div class="best-bet">
-                            <b>{row['Pick']}</b><br>
-                            {row['Event']} · {row['Market']}<br>
-                            Book: <b>{row['Sportsbook']}</b> · Odds: <b>{row['Odds']}</b> · Prev: <b>{row['Prev Odds']}</b><br>
-                            Edge: <b>{row['Edge %']:.2f}%</b> · Score: <b>{row['Bet Score']:.2f}</b> · Confidence: <b>{row['Confidence']}</b><br>
-                            Final Bet: <b>${int(row['Final Bet'])}</b> · Move: <b>{row['Line Move %']:+.2f}% ({row['Move Label']})</b><br>
-                            Decision: <b>{row['Allocation Status']}</b> {row['Watchlist Label']}<br>
-                            {build_badges_html(row)}<br>
-                            Reason: <i>{row['Pass Reason'] or row['Reason']}</i>
-                            {link_html}
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-
-        with top_right:
-            st.markdown('<div class="section-title">Board Logic</div>', unsafe_allow_html=True)
-            st.markdown(
-                f"""
-                <div class="card">
-                • <b>Line movement</b> compares the current number to the last number seen in your live session.<br>
-                • <b>Correlation protection</b> is <b>{'On' if correlation_guard else 'Off'}</b>.<br>
-                • <b>Total exposure cap</b> is <b>${max_total_exposure:.0f}</b>.<br>
-                • <b>Sport / event / book / prop caps</b> trim or pass lower-ranked bets.<br>
-                • Bets tagged <b>Improving</b> have moved toward a better number for you since the last refresh.<br>
-                • <b>Watchlist filter</b> is {'active' if str(watchlist_query).strip() else 'off'} and currently flags <b>{watchlist_hits}</b> rows.
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-        st.markdown('<div class="section-title">Live Dashboard Charts</div>', unsafe_allow_html=True)
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown("**Final Bets by Sportsbook**")
-            if live_bets.empty:
-                st.info("No chart data available.")
-            else:
-                chart_df = live_bets.groupby("Sportsbook").size().rename("Final Bets")
-                st.bar_chart(chart_df)
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        with c2:
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown("**Open Exposure by Sport**")
-            if exposure_by_sport.empty:
-                st.info("No chart data available.")
-            else:
-                st.bar_chart(exposure_by_sport)
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        c3, c4 = st.columns(2)
-        with c3:
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown("**Line Movement Mix**")
-            if live_bets.empty:
-                st.info("No chart data available.")
-            else:
-                chart_df = live_bets["Move Label"].value_counts().reindex(["Improving", "Flat", "Worse", "New"]).fillna(0)
-                st.bar_chart(chart_df)
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        with c4:
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown("**Allocation Decisions**")
-            if filtered_df.empty:
-                st.info("No chart data available.")
-            else:
-                chart_df = filtered_df["Allocation Status"].value_counts()
-                st.bar_chart(chart_df)
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        c5, c6 = st.columns(2)
-        with c5:
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown("**Exposure by Sportsbook**")
-            if exposure_by_book.empty:
-                st.info("No chart data available.")
-            else:
-                st.bar_chart(exposure_by_book)
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        with c6:
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown("**Confidence Mix**")
-            if live_bets.empty:
-                st.info("No chart data available.")
-            else:
-                chart_df = live_bets["Confidence"].value_counts().reindex(["Elite", "High", "Medium", "Low"]).fillna(0)
-                st.bar_chart(chart_df)
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="section-title">Top Edge vs Score Snapshot</div>', unsafe_allow_html=True)
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        if live_bets.empty:
-            st.info("No chart data available.")
+    with col1:
+        st.markdown('<div class="section-title">Top Final Bets</div>', unsafe_allow_html=True)
+        top_cards = controlled_df[controlled_df["Final Status"] == "Bet"].head(5)
+        if top_cards.empty:
+            st.info("No final bets available right now.")
         else:
-            chart_df = live_bets.head(8).copy()
-            chart_df["Label"] = chart_df["Pick"].str.slice(0, 30)
-            chart_df = chart_df.set_index("Label")[["Edge %", "Bet Score", "Line Move %"]]
-            st.line_chart(chart_df)
-        st.markdown('</div>', unsafe_allow_html=True)
+            for i, (_, row) in enumerate(top_cards.iterrows()):
+                watch_html = ""
+                if str(row.get("Watchlist Match", "")).strip():
+                    watch_html = f'<span class="pill pill-blue">Watchlist: {row["Watchlist Match"]}</span>'
+                st.markdown(
+                    f"""
+                    <div class="bet-card">
+                      <div>
+                        <span class="pill {pill_class_for_confidence(row['Confidence'])}">{row['Confidence']}</span>
+                        <span class="pill {pill_class_for_movement(row['Movement'])}">{row['Movement']}</span>
+                        <span class="pill {pill_class_for_final_status(row['Final Status'])}">{row['Final Status']}</span>
+                        {watch_html}
+                      </div>
+                      <b>{row['Pick']}</b><br>
+                      {row['Event']} · {row['Market']}<br>
+                      {row['Sportsbook']} {row['Odds']} · Edge {row['Edge %']:.2f}% · Score {row['Bet Score']:.2f} · Final Bet ${int(row['Final Bet'])}<br>
+                      <span style="color:#475569;">{row['Reason']}</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
-    with tabs[1]:
-        st.markdown('<div class="section-title">Best Bets Board</div>', unsafe_allow_html=True)
+    with col2:
+        st.markdown('<div class="section-title">Charts</div>', unsafe_allow_html=True)
 
-        display_df = filtered_df.copy()
-        display_df["Link"] = display_df["Link"].apply(make_link_markdown)
-        display_df["Minutes To Start"] = display_df["Minutes To Start"].apply(format_minutes)
-        display_df["Confidence Tag"] = display_df["Confidence"].apply(confidence_badge_text)
-        display_df["Move Tag"] = display_df["Move Label"].apply(move_badge_text)
-        display_df["Decision Tag"] = display_df["Allocation Status"].apply(decision_badge_text)
-        display_df = display_df[
+        chart_df = controlled_df[controlled_df["Final Status"] == "Bet"].copy()
+
+        if chart_df.empty:
+            st.info("No final bets to chart.")
+        else:
+            by_book = chart_df.groupby("Sportsbook")["Final Bet"].sum().sort_values(ascending=False)
+            st.markdown("**Live risk by sportsbook**")
+            st.bar_chart(by_book, height=220)
+
+            by_sport = chart_df.groupby("Sport")["Final Bet"].sum().sort_values(ascending=False)
+            st.markdown("**Live risk by sport**")
+            st.bar_chart(by_sport, height=220)
+
+            conf_mix = chart_df["Confidence"].value_counts()
+            st.markdown("**Confidence mix**")
+            st.bar_chart(conf_mix, height=200)
+
+# -----------------------------
+# BEST BETS
+# -----------------------------
+with tabs[1]:
+    st.markdown('<div class="section-title">Best Bets Board</div>', unsafe_allow_html=True)
+
+    board_df = display_df.copy()
+    if board_df.empty:
+        st.info("No rows match the current filters.")
+    else:
+        board_view = board_df[
             [
                 "Sport",
                 "Event",
@@ -1174,271 +1347,482 @@ def render_live_dashboard():
                 "Market",
                 "Pick",
                 "Sportsbook",
-                "Prev Odds",
                 "Odds",
-                "Watchlist Label",
-                "Confidence Tag",
-                "Move Tag",
-                "Decision Tag",
-                "Move Label",
-                "Line Move %",
                 "Implied Prob",
                 "Model Prob",
                 "Edge %",
-                "Best Line Gap %",
-                "Books Quoting",
                 "Bet Score",
                 "Confidence",
+                "Movement",
                 "Recommended Bet",
                 "Final Bet",
-                "Allocation Status",
-                "Minutes To Start",
                 "Final Status",
+                "Allocation Status",
                 "Pass Reason",
+                "Watchlist Match",
                 "Link",
             ]
         ]
 
         st.dataframe(
-            display_df,
+            board_view,
             use_container_width=True,
             hide_index=True,
+            key="best_bets_table",
             column_config={
                 "Implied Prob": st.column_config.NumberColumn(format="%.2f%%"),
                 "Model Prob": st.column_config.NumberColumn(format="%.2f%%"),
-                "Line Move %": st.column_config.NumberColumn(format="%.2f"),
-                "Edge %": st.column_config.ProgressColumn(
-                    "Edge %", min_value=0.0, max_value=max(float(max(display_df["Edge %"].max(), 1.0)), 1.0), format="%.2f%%"
-                ),
-                "Best Line Gap %": st.column_config.NumberColumn(format="%.2f%%"),
-                "Bet Score": st.column_config.ProgressColumn(
-                    "Bet Score", min_value=0.0, max_value=max(float(max(display_df["Bet Score"].max(), 1.0)), 1.0), format="%.2f"
-                ),
+                "Edge %": st.column_config.ProgressColumn("Edge %", min_value=-5.0, max_value=10.0, format="%.2f%%"),
+                "Bet Score": st.column_config.ProgressColumn("Bet Score", min_value=0.0, max_value=10.0, format="%.2f"),
                 "Recommended Bet": st.column_config.NumberColumn(format="$%d"),
                 "Final Bet": st.column_config.NumberColumn(format="$%d"),
                 "Link": st.column_config.LinkColumn("Open"),
             },
         )
 
+        final_bets_only = board_df[board_df["Final Status"] == "Bet"].copy()
         st.markdown('<div class="section-title">Explain This Bet</div>', unsafe_allow_html=True)
-        explain_candidates = filtered_df[filtered_df["Final Status"] == "Bet"].copy()
-        if explain_candidates.empty:
-            st.info("No final bets available to explain right now.")
+        if final_bets_only.empty:
+            st.info("No final bets available to explain.")
         else:
-            explain_candidates["Explain Label"] = explain_candidates.apply(
-                lambda row: f"{row['Event']} | {row['Pick']} | {row['Sportsbook']} {row['Odds']} | ${int(row['Final Bet'])}",
+            final_bets_only["Explain Label"] = final_bets_only.apply(
+                lambda row: f"{row['Event']} | {row['Pick']} | {row['Sportsbook']} {row['Odds']} | Score {row['Bet Score']:.2f}",
                 axis=1,
             )
             selected_label = st.selectbox(
                 "Choose a final bet to explain",
-                options=explain_candidates["Explain Label"].tolist(),
-                key="explain_bet_select",
+                options=final_bets_only["Explain Label"].tolist(),
+                key="best_bets_explain_select",
             )
-            explained_row = explain_candidates.loc[explain_candidates["Explain Label"] == selected_label].iloc[0]
+            selected_row = final_bets_only.loc[final_bets_only["Explain Label"] == selected_label].iloc[0]
             st.markdown(
                 f"""
-                <div class="card">
-                <b>{explained_row['Pick']}</b><br>
-                {explained_row['Event']} · {explained_row['Market']}<br>
-                {build_badges_html(explained_row)}<br>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.markdown(build_explain_bet_markdown(explained_row), unsafe_allow_html=False)
-
-    def sportsbook_section(book_name):
-        book_df = filtered_df[filtered_df["Sportsbook"] == book_name].copy()
-        bet_df = book_df[book_df["Final Status"] == "Bet"].copy()
-        avg_edge_book = float(bet_df["Edge %"].mean()) if not bet_df.empty else 0.0
-        avg_score_book = float(bet_df["Bet Score"].mean()) if not bet_df.empty else 0.0
-        max_stake_book = int(bet_df["Final Bet"].max()) if not bet_df.empty else 0
-        improving_book = int((bet_df["Move Label"] == "Improving").sum()) if not bet_df.empty else 0
-
-        st.markdown(f'<div class="section-title">{book_name} Opportunities</div>', unsafe_allow_html=True)
-        c1, c2 = st.columns([1.2, 1])
-
-        with c1:
-            st.markdown(
-                f"""
-                <div class="card">
-                <b>{book_name}</b><br>
-                This tab shows live lines from the selected leagues with line movement and risk controls applied.<br>
-                It is no longer just best price — it is best price after timing, correlation, and exposure rules.
+                <div class="soft-card">
+                <b>{selected_row['Pick']}</b><br>
+                {selected_row['Event']} · {selected_row['Market']}<br><br>
+                <b>Why it made the board:</b><br>
+                • Book: {selected_row['Sportsbook']} at {selected_row['Odds']}<br>
+                • Edge: {selected_row['Edge %']:.2f}%<br>
+                • Bet Score: {selected_row['Bet Score']:.2f}<br>
+                • Confidence: {selected_row['Confidence']}<br>
+                • Movement: {selected_row['Movement']}<br>
+                • Final Bet: ${int(selected_row['Final Bet'])}<br>
+                • Allocation Status: {selected_row['Allocation Status']}<br>
+                • Logic: {selected_row['Reason']}<br>
+                {f"• Watchlist Match: {selected_row['Watchlist Match']}<br>" if str(selected_row.get('Watchlist Match', '')).strip() else ""}
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
-        with c2:
-            st.markdown(
-                f"""
-                <div class="card">
-                Final Bets: <b>{len(bet_df)}</b><br>
-                Avg Edge: <b>{avg_edge_book:.2f}%</b><br>
-                Avg Score: <b>{avg_score_book:.2f}</b><br>
-                Max Final Bet: <b>${max_stake_book}</b><br>
-                Improving Lines: <b>{improving_book}</b>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+# -----------------------------
+# COMPARE LINES
+# -----------------------------
+with tabs[2]:
+    st.markdown('<div class="section-title">Compare Lines</div>', unsafe_allow_html=True)
+    if compare_df.empty:
+        st.info("No compare-lines rows available.")
+    else:
+        st.dataframe(
+            compare_df[
+                [
+                    "Sport",
+                    "Event",
+                    "Market Bucket",
+                    "Market",
+                    "Pick",
+                    "DraftKings",
+                    "FanDuel",
+                    "Bet365",
+                    "PrizePicks",
+                    "Best Book",
+                    "Best Odds",
+                    "Books Quoting",
+                    "Line Gap %",
+                    "Shop Alert",
+                    "Best Confidence",
+                    "Best Score",
+                    "Best Final Bet",
+                    "Best Final Status",
+                    "Best Link",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+            key="compare_lines_table",
+            column_config={
+                "Line Gap %": st.column_config.ProgressColumn("Line Gap %", min_value=0.0, max_value=10.0, format="%.2f%%"),
+                "Best Score": st.column_config.ProgressColumn("Best Score", min_value=0.0, max_value=10.0, format="%.2f"),
+                "Best Final Bet": st.column_config.NumberColumn(format="$%d"),
+                "Best Link": st.column_config.LinkColumn("Open"),
+            },
+        )
 
-        if book_df.empty:
-            st.warning(f"No rows currently available for {book_name}.")
-            return
+# -----------------------------
+# QUICK LINKS
+# -----------------------------
+with tabs[3]:
+    st.markdown('<div class="section-title">Quick Links</div>', unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div class="quick-link-grid">
+          <div class="quick-link-card"><a href="https://sportsbook.draftkings.com/" target="_blank">Open DraftKings</a></div>
+          <div class="quick-link-card"><a href="https://sportsbook.fanduel.com/" target="_blank">Open FanDuel</a></div>
+          <div class="quick-link-card"><a href="https://www.bet365.com/" target="_blank">Open Bet365</a></div>
+          <div class="quick-link-card"><a href="https://app.prizepicks.com/" target="_blank">Open PrizePicks</a></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-        book_df["Link"] = book_df["Link"].apply(make_link_markdown)
-        book_df["Minutes To Start"] = book_df["Minutes To Start"].apply(format_minutes)
-        book_df["Confidence Tag"] = book_df["Confidence"].apply(confidence_badge_text)
-        book_df["Move Tag"] = book_df["Move Label"].apply(move_badge_text)
-        book_df["Decision Tag"] = book_df["Allocation Status"].apply(decision_badge_text)
-        book_df = book_df[
+# -----------------------------
+# BOOK TABS
+# -----------------------------
+def render_book_tab(book_name: str, tab_key: str):
+    st.markdown(f'<div class="section-title">{book_name} Opportunities</div>', unsafe_allow_html=True)
+    book_df = controlled_df[controlled_df["Sportsbook"] == book_name].copy()
+    if book_df.empty:
+        st.info(f"No rows currently available for {book_name}.")
+        return
+    st.dataframe(
+        book_df[
             [
                 "Sport",
                 "Event",
                 "Market Bucket",
                 "Market",
                 "Pick",
-                "Prev Odds",
                 "Odds",
-                "Watchlist Label",
-                "Confidence Tag",
-                "Move Tag",
-                "Decision Tag",
-                "Move Label",
-                "Line Move %",
                 "Edge %",
                 "Bet Score",
                 "Confidence",
-                "Recommended Bet",
+                "Movement",
                 "Final Bet",
-                "Allocation Status",
                 "Final Status",
-                "Minutes To Start",
+                "Allocation Status",
                 "Pass Reason",
                 "Link",
             ]
-        ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+        key=f"{tab_key}_table",
+        column_config={
+            "Edge %": st.column_config.ProgressColumn("Edge %", min_value=-5.0, max_value=10.0, format="%.2f%%"),
+            "Bet Score": st.column_config.ProgressColumn("Bet Score", min_value=0.0, max_value=10.0, format="%.2f"),
+            "Final Bet": st.column_config.NumberColumn(format="$%d"),
+            "Link": st.column_config.LinkColumn("Open"),
+        },
+    )
 
+with tabs[4]:
+    render_book_tab("DraftKings", "dk")
+with tabs[5]:
+    render_book_tab("FanDuel", "fd")
+with tabs[6]:
+    render_book_tab("Bet365", "b365")
+with tabs[7]:
+    render_book_tab("PrizePicks", "pp")
+
+# -----------------------------
+# AI ASSISTANT
+# -----------------------------
+with tabs[8]:
+    st.markdown('<div class="section-title">AI Betting Assistant</div>', unsafe_allow_html=True)
+
+    if "ai_history" not in st.session_state:
+        st.session_state["ai_history"] = []
+
+    preset_cols = st.columns(4)
+    preset_prompts = [
+        ("Safest bets today", "What are the safest bets on the board right now and why?"),
+        ("Strongest edge", "Which current bets have the strongest edge and what makes them stand out?"),
+        ("Overexposure check", "Where am I overexposed right now and what should I avoid?"),
+        ("Book comparison", "Compare DraftKings and FanDuel for the best current opportunities."),
+    ]
+
+    for idx, (label, prompt) in enumerate(preset_prompts):
+        with preset_cols[idx]:
+            if st.button(label, key=f"ai_preset_{idx}"):
+                context_text = summarize_dashboard_context(controlled_df, compare_df)
+                answer = call_openai_assistant(prompt, context_text)
+                st.session_state["ai_history"].append(("user", prompt))
+                st.session_state["ai_history"].append(("assistant", answer))
+
+    final_bets_ai = controlled_df[controlled_df["Final Status"] == "Bet"].copy()
+    if not final_bets_ai.empty:
+        final_bets_ai["AI Label"] = final_bets_ai.apply(
+            lambda row: f"{row['Event']} | {row['Pick']} | {row['Sportsbook']} {row['Odds']}",
+            axis=1,
+        )
+        selected_ai_bet = st.selectbox(
+            "AI explain a specific final bet",
+            options=["None"] + final_bets_ai["AI Label"].tolist(),
+            key="ai_bet_select",
+        )
+        if selected_ai_bet != "None" and st.button("Explain selected bet with AI", key="ai_explain_btn"):
+            row = final_bets_ai.loc[final_bets_ai["AI Label"] == selected_ai_bet].iloc[0]
+            prompt = (
+                f"Explain this bet clearly for a non-expert: {row['Pick']} in {row['Event']} at {row['Sportsbook']} {row['Odds']}. "
+                f"Discuss edge, confidence, movement, and bankroll sizing."
+            )
+            context_text = summarize_dashboard_context(controlled_df, compare_df)
+            answer = call_openai_assistant(prompt, context_text)
+            st.session_state["ai_history"].append(("user", prompt))
+            st.session_state["ai_history"].append(("assistant", answer))
+
+    with st.form("ai_custom_form", clear_on_submit=False):
+        custom_prompt = st.text_area(
+            "Ask the dashboard AI a question",
+            placeholder="Example: Which final bets are best for a cautious bettor today?",
+            key="ai_custom_prompt",
+        )
+        submitted_ai = st.form_submit_button("Ask AI")
+        if submitted_ai and custom_prompt.strip():
+            context_text = summarize_dashboard_context(controlled_df, compare_df)
+            answer = call_openai_assistant(custom_prompt.strip(), context_text)
+            st.session_state["ai_history"].append(("user", custom_prompt.strip()))
+            st.session_state["ai_history"].append(("assistant", answer))
+
+    st.markdown("#### Conversation")
+    if not st.session_state["ai_history"]:
+        st.info("Use a preset prompt or type a custom question above.")
+    else:
+        for idx, (role, message) in enumerate(st.session_state["ai_history"][-12:]):
+            if role == "user":
+                st.markdown(f"**You:** {message}")
+            else:
+                st.markdown(
+                    f"""
+                    <div class="soft-card">
+                    <b>AI Assistant:</b><br>
+                    {message}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+# -----------------------------
+# TRACKER
+# -----------------------------
+with tabs[9]:
+    st.markdown('<div class="section-title">Tracker</div>', unsafe_allow_html=True)
+
+    tracker_col1, tracker_col2 = st.columns(2)
+
+    with tracker_col1:
+        st.markdown("#### Log a final bet")
+        tracker_candidates = controlled_df[controlled_df["Final Status"] == "Bet"].copy()
+        if tracker_candidates.empty:
+            st.info("No final bets available to log.")
+        else:
+            tracker_candidates["Log Label"] = tracker_candidates.apply(
+                lambda row: f"{row['Event']} | {row['Pick']} | {row['Sportsbook']} {row['Odds']} | Final Bet ${int(row['Final Bet'])}",
+                axis=1,
+            )
+            with st.form("log_bet_form_unique"):
+                selected_log_label = st.selectbox(
+                    "Choose a final bet",
+                    options=tracker_candidates["Log Label"].tolist(),
+                    key="tracker_log_select",
+                )
+                log_submit = st.form_submit_button("Log Selected Bet")
+                if log_submit:
+                    row = tracker_candidates.loc[tracker_candidates["Log Label"] == selected_log_label].iloc[0]
+                    ok, msg = log_bet_from_row(row)
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.warning(msg)
+
+    with tracker_col2:
+        st.markdown("#### Settle a pending bet")
+        pending_live = load_bet_log()
+        pending_live = pending_live[pending_live["Bet Status"] == "Pending"].copy()
+        if pending_live.empty:
+            st.info("No pending bets to settle.")
+        else:
+            pending_live["Settle Label"] = pending_live.apply(
+                lambda row: f"{row['Bet ID']} | {row['Event']} | {row['Pick']} | {row['Sportsbook']} {row['Odds']} | Stake ${row['Stake']:,.2f}",
+                axis=1,
+            )
+            with st.form("settle_bet_form_unique"):
+                selected_settle_label = st.selectbox(
+                    "Choose a pending bet",
+                    options=pending_live["Settle Label"].tolist(),
+                    key="tracker_settle_select",
+                )
+                settle_result = st.radio("Result", ["Win", "Loss", "Push"], horizontal=True, key="tracker_settle_radio")
+                settle_submit = st.form_submit_button("Settle Bet")
+                if settle_submit:
+                    bet_id = selected_settle_label.split(" | ")[0]
+                    ok, msg = settle_bet(bet_id, settle_result)
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.warning(msg)
+
+    st.markdown("#### Pending Bets")
+    pending_view = load_bet_log()
+    pending_view = pending_view[pending_view["Bet Status"] == "Pending"].copy()
+    if pending_view.empty:
+        st.info("No pending bets currently logged.")
+    else:
         st.dataframe(
-            book_df,
+            pending_view[
+                [
+                    "Bet ID",
+                    "Logged At",
+                    "Sport",
+                    "Event",
+                    "Pick",
+                    "Sportsbook",
+                    "Odds",
+                    "Stake",
+                    "Confidence",
+                    "Bet Score",
+                    "Reason",
+                ]
+            ],
             use_container_width=True,
             hide_index=True,
+            key="tracker_pending_table",
             column_config={
-                "Line Move %": st.column_config.NumberColumn(format="%.2f"),
-                "Edge %": st.column_config.ProgressColumn(
-                    "Edge %", min_value=0.0, max_value=max(float(max(book_df["Edge %"].max(), 1.0)), 1.0), format="%.2f%%"
-                ),
-                "Bet Score": st.column_config.ProgressColumn(
-                    "Bet Score", min_value=0.0, max_value=max(float(max(book_df["Bet Score"].max(), 1.0)), 1.0), format="%.2f"
-                ),
-                "Recommended Bet": st.column_config.NumberColumn(format="$%d"),
-                "Final Bet": st.column_config.NumberColumn(format="$%d"),
-                "Link": st.column_config.LinkColumn("Open"),
+                "Stake": st.column_config.NumberColumn(format="$%.2f"),
+                "Bet Score": st.column_config.NumberColumn(format="%.2f"),
             },
         )
 
-    with tabs[2]:
-        sportsbook_section("DraftKings")
+# -----------------------------
+# RESULTS
+# -----------------------------
+with tabs[10]:
+    st.markdown('<div class="section-title">Results</div>', unsafe_allow_html=True)
 
-    with tabs[3]:
-        sportsbook_section("FanDuel")
-
-    with tabs[4]:
-        sportsbook_section("Bet365")
-
-    with tabs[5]:
-        sportsbook_section("PrizePicks")
-
-    with tabs[6]:
-        st.markdown('<div class="section-title">Bankroll + Exposure Rules</div>', unsafe_allow_html=True)
-        b1, b2, b3, b4 = st.columns(4)
-        with b1:
-            st.markdown(
-                f"""
-                <div class="card">
-                <div class="small-label">Current Bankroll</div>
-                <div class="big-value">${bankroll:,.2f}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with b2:
-            st.markdown(
-                f"""
-                <div class="card">
-                <div class="small-label">Open Suggested Risk</div>
-                <div class="big-value">${open_risk:.0f}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with b3:
-            st.markdown(
-                f"""
-                <div class="card">
-                <div class="small-label">Max Total Exposure</div>
-                <div class="big-value">${max_total_exposure:.0f}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with b4:
-            st.markdown(
-                f"""
-                <div class="card">
-                <div class="small-label">Correlation Guard</div>
-                <div class="big-value">{'On' if correlation_guard else 'Off'}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-        x1, x2 = st.columns(2)
-        with x1:
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown("**Exposure Caps**")
-            caps_df = pd.DataFrame(
-                {
-                    "Rule": [
-                        "Per Sport",
-                        "Per Event",
-                        "Per Sportsbook",
-                        "Props Only",
-                    ],
-                    "Cap": [
-                        f"${max_sport_exposure:.0f}",
-                        f"${max_event_exposure:.0f}",
-                        f"${max_book_exposure:.0f}",
-                        f"${max_prop_exposure:.0f}",
-                    ],
-                }
-            )
-            st.dataframe(caps_df, use_container_width=True, hide_index=True)
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        with x2:
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown("**Current Open Exposure by Sport**")
-            if exposure_by_sport.empty:
-                st.info("No live exposure right now.")
-            else:
-                st.bar_chart(exposure_by_sport)
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="card">', unsafe_allow_html=True)
+    if settled_df.empty:
+        st.info("No settled bets yet.")
+    else:
         st.markdown(
-            """
-            <b>What makes it pop more from here:</b><br>
-            • add sportsbook logo images beside each tab card<br>
-            • add row highlight badges for Elite / Improving / Trimmed<br>
-            • add a compact quick-links ribbon at the top for one-click sportsbook jumps<br>
-            • add watchlist filters for favorite teams or market types
+            f"""
+            <div class="soft-card">
+            <b>Settled Bets:</b> {len(settled_df)} &nbsp;&nbsp; 
+            <b>Win Rate:</b> {win_rate:.1f}% &nbsp;&nbsp; 
+            <b>Profit / Loss:</b> ${realized_pnl:,.2f} &nbsp;&nbsp; 
+            <b>ROI:</b> {roi:.1f}%
+            </div>
             """,
             unsafe_allow_html=True,
         )
-        st.markdown('</div>', unsafe_allow_html=True)
 
+        results_col1, results_col2 = st.columns(2)
 
-render_live_dashboard()
+        with results_col1:
+            st.markdown("**Profit by sportsbook**")
+            book_profit = settled_df.groupby("Sportsbook")["PNL"].sum().sort_values(ascending=False)
+            st.bar_chart(book_profit, height=240)
+
+            st.markdown("**Profit by market type**")
+            market_profit = settled_df.groupby("Market Bucket")["PNL"].sum().sort_values(ascending=False)
+            st.bar_chart(market_profit, height=240)
+
+        with results_col2:
+            running = settled_df.copy()
+            running["Sort Time"] = pd.to_datetime(running["Settled At"], errors="coerce")
+            running = running.sort_values("Sort Time")
+            running["Running Bankroll"] = bankroll + running["PNL"].cumsum()
+            if not running.empty:
+                st.markdown("**Bankroll curve**")
+                st.line_chart(running.set_index("Sort Time")["Running Bankroll"], height=240)
+
+            if not graded_df.empty:
+                st.markdown("**Hit rate by confidence**")
+                hit_rate_conf = (
+                    graded_df.assign(WinFlag=(graded_df["Result"] == "Win").astype(int))
+                    .groupby("Confidence")["WinFlag"]
+                    .mean()
+                    .mul(100)
+                    .sort_values(ascending=False)
+                )
+                st.bar_chart(hit_rate_conf, height=240)
+
+        st.markdown("#### Settled Bet History")
+        st.dataframe(
+            settled_df[
+                [
+                    "Bet ID",
+                    "Logged At",
+                    "Settled At",
+                    "Sport",
+                    "Event",
+                    "Pick",
+                    "Sportsbook",
+                    "Odds",
+                    "Stake",
+                    "Result",
+                    "PNL",
+                    "Confidence",
+                    "Bet Score",
+                ]
+            ].sort_values("Settled At", ascending=False),
+            use_container_width=True,
+            hide_index=True,
+            key="results_history_table",
+            column_config={
+                "Stake": st.column_config.NumberColumn(format="$%.2f"),
+                "PNL": st.column_config.NumberColumn(format="$%.2f"),
+                "Bet Score": st.column_config.NumberColumn(format="%.2f"),
+            },
+        )
+
+# -----------------------------
+# BANKROLL
+# -----------------------------
+with tabs[11]:
+    st.markdown('<div class="section-title">Bankroll</div>', unsafe_allow_html=True)
+
+    bankroll_cards = f"""
+    <div class="kpi-grid">
+      <div class="kpi-card"><div class="kpi-label">Starting Bankroll</div><div class="kpi-value">${bankroll:,.2f}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Current Bankroll</div><div class="kpi-value">${current_bankroll:,.2f}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Logged Open Risk</div><div class="kpi-value">${open_logged_risk:,.2f}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Live Suggested Risk</div><div class="kpi-value">${open_live_risk:,.2f}</div></div>
+    </div>
+    """
+    st.markdown(bankroll_cards, unsafe_allow_html=True)
+
+    risk_df = pd.DataFrame(
+        {
+            "Cap": [
+                "Total Exposure",
+                "Per Sport",
+                "Per Event",
+                "Per Sportsbook",
+                "Prop Exposure",
+                "Max Props Per Event",
+            ],
+            "Setting": [
+                max_total_exposure,
+                max_sport_exposure,
+                max_event_exposure,
+                max_book_exposure,
+                max_prop_exposure,
+                max_event_props,
+            ],
+        }
+    )
+    st.markdown("#### Current Risk Settings")
+    st.dataframe(risk_df, use_container_width=True, hide_index=True, key="bankroll_risk_table")
+
+    live_final = controlled_df[controlled_df["Final Status"] == "Bet"].copy()
+    if not live_final.empty:
+        st.markdown("#### Live Risk Allocation")
+        alloc_cols = st.columns(3)
+        with alloc_cols[0]:
+            st.markdown("**By sport**")
+            st.bar_chart(live_final.groupby("Sport")["Final Bet"].sum().sort_values(ascending=False), height=220)
+        with alloc_cols[1]:
+            st.markdown("**By sportsbook**")
+            st.bar_chart(live_final.groupby("Sportsbook")["Final Bet"].sum().sort_values(ascending=False), height=220)
+        with alloc_cols[2]:
+            st.markdown("**By market type**")
+            st.bar_chart(live_final.groupby("Market Bucket")["Final Bet"].sum().sort_values(ascending=False), height=220)
