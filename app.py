@@ -3182,28 +3182,28 @@ Bankroll tab. Params: <code>addBet</code>, <code>book</code>,
         )
     # ---- Game-day theme music (#85) - YouTube + DB + localStorage ----
     with st.expander("Game-day theme music", expanded=False):
+        # Default = the user-picked YouTube video for each team's fight song.
         _DEFAULTS = {
             "Alabama Crimson Tide": (
-                "Million Dollar Band - Yea Alabama",
-                "https://www.youtube.com/results?search_query="
-                "yea+alabama+million+dollar+band",
-                "tcYodQoapMg",
+                "Yea Alabama - Fight Song",
+                "yea+alabama+million+dollar+band+fight+song",
+                "5BxxbTPoWWY",
             ),
             "Tennessee Volunteers": (
-                "Pride of the Southland - Rocky Top",
-                "https://www.youtube.com/results?search_query="
-                "rocky+top+pride+of+the+southland+band",
-                "B3yTCgIckNs",
+                "Rocky Top - Fight Song",
+                "rocky+top+pride+of+the+southland+band+fight+song",
+                "K6jImkLDzlY",
             ),
         }
-        _default_label, _search_url, _default_vid = _DEFAULTS.get(
+        _default_label, _search_q, _default_vid = _DEFAULTS.get(
             _theme_name,
-            (
-                "Lo-fi trading beats",
-                "https://www.youtube.com/results?search_query=lofi+sports",
-                "jfKfPfyJRdk",
-            ),
+            ("Lo-fi sports trading beats", "lofi+sports+trading",
+             "jfKfPfyJRdk"),
         )
+        _search_url = (
+            f"https://www.youtube.com/results?search_query={_search_q}"
+        )
+        _default_embed = f"https://www.youtube.com/embed/{_default_vid}"
 
         # Persistence key (per theme)
         _db_key = f"music_url::{_theme_name}"
@@ -3261,10 +3261,14 @@ Bankroll tab. Params: <code>addBet</code>, <code>book</code>,
             )
             return m.group(1) if m else None
 
-        _vid = _yt_id(_user_url) or _default_vid
+        _vid = _yt_id(_user_url)
+        _embed_src = (
+            f"https://www.youtube.com/embed/{_vid}" if _vid
+            else _default_embed
+        )
         st.markdown(
             f"<iframe width='100%' height='200' "
-            f"src='https://www.youtube.com/embed/{_vid}' "
+            f"src='{_embed_src}' "
             f"title='EDGE theme music' frameborder='0' "
             f"allow='accelerometer; autoplay; clipboard-write; "
             f"encrypted-media; gyroscope; picture-in-picture' "
