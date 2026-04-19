@@ -12,7 +12,6 @@ import altair as alt
 import pandas as pd
 import requests
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 
 LEAGUES = [
     {"id": "NBA", "name": "NBA"},
@@ -34,6 +33,66 @@ BOOK_COLOR = {
     "fanduel":    "#1493FF",
     "bet365":     "#F2C100",
 }
+BOOK_LABEL = {
+    "draftkings": "DK",
+    "fanduel":    "FD",
+    "bet365":     "B365",
+}
+
+# PrizePicks Power Play payout multipliers (entry x mult on full hit)
+PP_PAYOUTS = {2: 3, 3: 5, 4: 10, 5: 20, 6: 25}
+
+TEAM_PALETTE = [
+    "#9E1B32", "#1493FF", "#F59E0B", "#22C55E", "#7B43F4",
+    "#EC4899", "#06B6D4", "#F97316", "#84CC16", "#A855F7",
+    "#EF4444", "#14B8A6", "#EAB308", "#3B82F6", "#D946EF",
+]
+
+
+def team_initials(name):
+    if not name:
+        return "?"
+    words = [w for w in name.replace("-", " ").split() if w]
+    if not words:
+        return name[:2].upper()
+    if len(words) == 1:
+        return words[0][:3].upper()
+    return "".join(w[0] for w in words[:3]).upper()
+
+
+def team_color(name):
+    if not name:
+        return CRIMSON
+    return TEAM_PALETTE[sum(ord(c) for c in name) % len(TEAM_PALETTE)]
+
+
+def team_badge(name):
+    initials = team_initials(name)
+    color = team_color(name)
+    return (
+        f"<span class='team-badge' style='background:{color}'>"
+        f"{initials}</span>"
+    )
+
+
+def book_badge(book):
+    key = (book or "").lower()
+    color = BOOK_COLOR.get(key, MUTED)
+    label = BOOK_LABEL.get(key, (book or "?")[:4].upper())
+    return (
+        f"<span class='book-badge' style='background:{color}'>{label}</span>"
+    )
+
+
+def matchup_badges(matchup):
+    if " @ " not in matchup:
+        return matchup
+    away, home = matchup.split(" @ ", 1)
+    return (
+        f"{team_badge(away)} <span class='muted'>{away}</span> "
+        f"<span class='muted'>@</span> "
+        f"{team_badge(home)} <span style='color:#F1F5F9'>{home}</span>"
+    )
 
 SGO_BASE = "https://api.sportsgameodds.com/v2"
 DB_PATH = os.environ.get("EDGE_DB_PATH", "edge_bets.db")
@@ -306,7 +365,7 @@ class GameEvent:
     player_props: list = field(default_factory=list)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=7200, show_spinner=False)
 def fetch_events(league):
     key = get_secret("SPORTS_GAME_ODDS_API_KEY")
     if not key:
@@ -614,6 +673,28 @@ section[data-testid="stSidebar"] { background: __PANEL__; }
 .kpi .label { color:__MUTED__; font-size:.8rem; text-transform:uppercase; letter-spacing:.05em; }
 .kpi .value { color:#F8FAFC; font-size:1.5rem; font-weight:700; font-variant-numeric: tabular-nums; }
 .muted { color:__MUTED__; }
+.team-badge {
+    display:inline-block; min-width: 34px; padding: 3px 8px;
+    border-radius: 6px; font-weight: 800; font-size: .72rem;
+    color: #0B1220; text-align: center; letter-spacing: .04em;
+    margin-right: 4px; vertical-align: middle;
+}
+.book-badge {
+    display:inline-block; min-width: 28px; padding: 2px 7px;
+    border-radius: 5px; font-weight: 800; font-size: .7rem;
+    color: #0B1220; text-align: center; margin: 0 2px;
+    vertical-align: middle;
+}
+.refresh-bar {
+    display:flex; align-items:center; gap:10px; margin-bottom: 10px;
+    color: __MUTED__; font-size: .85rem;
+}
+.cache-chip {
+    background: __PANEL__; border: 1px solid rgba(255,255,255,.08);
+    border-radius: 999px; padding: 4px 12px; color:#E2E8F0;
+    font-variant-numeric: tabular-nums;
+}
+.cache-chip.stale { color: __AMBER__; border-color: rgba(245,158,11,.5); }
 table { color: #E2E8F0; }
 .stTabs [data-baseweb="tab-list"] { gap: 6px; }
 .stTabs [data-baseweb="tab"] {
@@ -668,12 +749,6 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.markdown("### Live data")
-    auto_refresh = st.checkbox("Auto-refresh every 60s", value=True)
-    if auto_refresh:
-        st_autorefresh(interval=60 * 1000, key="auto_refresh_tick")
-
-    st.markdown("---")
     st.markdown("### Filters")
     book_choice = st.multiselect(
         "Books to compare",
@@ -696,7 +771,15 @@ def size_pick(r):
     )
 
 
-now_str = datetime.now().strftime("%I:%M %p")
+if "last_refresh" not in st.session_state:
+    st.session_state["last_refresh"] = datetime.now(timezone.utc)
+
+last_refresh = st.session_state["last_refresh"]
+age_min = (datetime.now(timezone.utc) - last_refresh).total_seconds() / 60.0
+age_label = f"{age_min:.0f} min" if age_min >= 1 else "just now"
+chip_cls = "cache-chip stale" if age_min >= 120 else "cache-chip"
+last_str = last_refresh.astimezone().strftime("%I:%M %p")
+
 header_html = (
     "<div class='edge-header'>"
     "<div>"
@@ -704,12 +787,27 @@ header_html = (
     "<div class='tag'>Risk-tiered picks across DraftKings, FanDuel, Bet365 - "
     "PrizePicks player-prop candidates</div>"
     "</div>"
-    f"<div class='tag'>Updated {now_str}</div>"
+    f"<div class='tag'>Last refresh {last_str}</div>"
     "</div>"
 )
 st.markdown(header_html, unsafe_allow_html=True)
 
-# Fetch + snapshot
+rb_left, rb_right = st.columns([5, 1])
+with rb_left:
+    st.markdown(
+        "<div class='refresh-bar'>"
+        f"<span class='{chip_cls}'>Data {age_label} old</span>"
+        "<span class='muted'>Cache holds odds for 2 hours - "
+        "click Refresh to pull fresh data from SportsGameOdds.</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+with rb_right:
+    if st.button("Refresh now", use_container_width=True, type="primary"):
+        fetch_events.clear()
+        st.session_state["last_refresh"] = datetime.now(timezone.utc)
+        st.rerun()
+
 all_team_picks = all_picks(books_filter, kind="team")
 all_prop_picks = all_picks(books_filter, kind="player")
 db_snapshot(all_team_picks, "team")
@@ -768,8 +866,9 @@ for b in SPORTSBOOK_LINKS:
 links_html += "</div>"
 st.markdown(links_html, unsafe_allow_html=True)
 
-tab_picks, tab_props, tab_parlay, tab_board, tab_bank = st.tabs(
-    ["Suggested Picks", "PrizePicks Picks", "Parlay Builder", "Odds Board", "Bankroll"]
+tab_picks, tab_props, tab_pp_board, tab_parlay, tab_board, tab_bank = st.tabs(
+    ["Suggested Picks", "PrizePicks Picks", "PrizePicks Board",
+     "Parlay Builder", "Odds Board", "Bankroll"]
 )
 
 with tab_picks:
@@ -930,10 +1029,12 @@ with tab_picks:
             card = (
                 "<div class='pick-card'><div class='pick-row'>"
                 "<div>"
-                f"<div class='pick-title'>{r['matchup']} - "
-                f"<span class='muted'>{r['league']} - {r['market']}</span></div>"
-                f"<div class='pick-sub'>Pick: <b style='color:#F8FAFC'>{r['pick']}</b> "
-                f"@ {format_american(r['price'])} on <b>{r['book']}</b> - "
+                f"<div class='pick-title'>{matchup_badges(r['matchup'])} "
+                f"<span class='muted' style='font-size:.85rem;'>"
+                f"&nbsp;&nbsp;{r['league']} - {r['market']}</span></div>"
+                f"<div class='pick-sub' style='margin-top:4px;'>Pick: "
+                f"<b style='color:#F8FAFC'>{r['pick']}</b> "
+                f"@ {format_american(r['price'])} on {book_badge(r['book'])} - "
                 f"{r['books_count']} books compared</div>"
                 f"<div style='margin-top:6px;'>{spark_html}</div>"
                 "</div>"
@@ -988,8 +1089,10 @@ with tab_props:
                 "<div>"
                 f"<div class='pick-title'>{r['player']} - "
                 f"<span class='muted'>{r['stat']} {r['side']} {r['line']:g}</span></div>"
-                f"<div class='pick-sub'>{r['matchup']} - {r['league']} - "
-                f"best @ {format_american(r['price'])} on {r['book']} - "
+                f"<div class='pick-sub' style='margin-top:4px;'>"
+                f"{matchup_badges(r['matchup'])}"
+                f"<span style='margin:0 8px;' class='muted'>{r['league']}</span>"
+                f"best @ {format_american(r['price'])} on {book_badge(r['book'])} - "
                 f"{r['books_count']} books</div>"
                 f"<div style='margin-top:6px;'>{spark_html}</div>"
                 "</div>"
@@ -1001,6 +1104,120 @@ with tab_props:
                 "</div></div></div>"
             )
             st.markdown(card, unsafe_allow_html=True)
+
+with tab_pp_board:
+    st.subheader("PrizePicks Board Builder")
+    st.caption(
+        "PrizePicks 'Power Play' boards: pick 2-6 props that all must hit. "
+        "Payout = entry x multiplier (2:3x, 3:5x, 4:10x, 5:20x, 6:25x). "
+        "Hit probability uses consensus probability across books per leg."
+    )
+    if not all_prop_picks:
+        st.info("No player props available right now.")
+    else:
+        pp_pool = all_prop_picks[:60]
+        pp_labels = [
+            f"[{format_bps(r['edge_bps'])}] {r['player']} {r['side']} "
+            f"{r['line']:g} {r['stat']} ({r['matchup']}, {r['league']}) "
+            f"@ {format_american(r['price'])} on {r['book']}"
+            for r in pp_pool
+        ]
+        chosen = st.multiselect(
+            "Pick 2-6 props (sorted by edge)",
+            options=list(range(len(pp_labels))),
+            format_func=lambda i: pp_labels[i],
+            max_selections=6,
+            key="pp_board_picks",
+        )
+        entry = st.number_input(
+            "Entry ($)", min_value=1.0, value=5.0, step=1.0, key="pp_entry",
+        )
+
+        if 2 <= len(chosen) <= 6:
+            legs = [pp_pool[i] for i in chosen]
+            probs = [
+                1.0 / l["avg_dec"] if l["avg_dec"] > 0 else 0.0 for l in legs
+            ]
+            hit_prob = prod(probs) if all(p > 0 for p in probs) else 0.0
+            mult = PP_PAYOUTS[len(chosen)]
+            payout = entry * mult
+            ev = hit_prob * payout - entry
+            ev_color = GREEN if ev > 0 else RED
+            be_prob = 1.0 / mult
+
+            cols = st.columns(5)
+            cols[0].markdown(kpi("Legs", str(len(legs))), unsafe_allow_html=True)
+            cols[1].markdown(
+                kpi("Multiplier", f"{mult}x"), unsafe_allow_html=True,
+            )
+            cols[2].markdown(
+                kpi("Hit prob", f"{hit_prob*100:,.1f}%"),
+                unsafe_allow_html=True,
+            )
+            cols[3].markdown(
+                kpi("Break-even", f"{be_prob*100:,.1f}%"),
+                unsafe_allow_html=True,
+            )
+            cols[4].markdown(
+                kpi("Expected value", f"${ev:+,.2f}", color=ev_color),
+                unsafe_allow_html=True,
+            )
+
+            if ev > 0:
+                st.success(
+                    f"Positive EV board: hit probability ({hit_prob*100:.1f}%) "
+                    f"beats break-even ({be_prob*100:.1f}%). "
+                    f"Potential payout ${payout:,.2f} for ${entry:,.2f} entry."
+                )
+            else:
+                edge_needed = (be_prob - hit_prob) * 100
+                st.warning(
+                    f"Negative EV: you need {edge_needed:.1f}% more hit "
+                    f"probability to break even. Drop the weakest leg or "
+                    f"swap it for higher-edge picks."
+                )
+
+            st.markdown("**Legs in this board:**")
+            for l, p in zip(legs, probs):
+                st.markdown(
+                    "<div class='pick-card' style='padding:10px 14px;'>"
+                    f"<b>{l['player']}</b> "
+                    f"<span class='muted'>{l['side']} {l['line']:g} "
+                    f"{l['stat']}</span> &mdash; "
+                    f"{matchup_badges(l['matchup'])} "
+                    f"<span class='muted'>{l['league']}</span> &mdash; "
+                    f"hit {p*100:.1f}% &mdash; "
+                    f"{format_bps(l['edge_bps'])} edge"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
+            if st.button("Log this board as a parlay", key="pp_log"):
+                desc = " + ".join(
+                    f"{l['player']} {l['side']} {l['line']:g}" for l in legs
+                )
+                bet = {
+                    "id": str(time.time()),
+                    "date": datetime.now(timezone.utc).date().isoformat(),
+                    "description": f"PrizePicks {len(legs)}-leg: {desc}",
+                    "book": "prizepicks",
+                    "odds": decimal_to_american(float(mult)),
+                    "stake": float(entry),
+                    "to_win": float(payout - entry),
+                    "status": "open",
+                    "kind": "prizepicks",
+                    "legs": "; ".join(
+                        f"{l['player']} {l['side']} {l['line']:g} "
+                        f"{l['stat']} ({l['matchup']})"
+                        for l in legs
+                    ),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+                db_insert_bet(bet)
+                st.success("Board logged. See the Bankroll tab.")
+                st.rerun()
+        elif chosen:
+            st.info("Pick at least 2 props.")
 
 with tab_parlay:
     st.subheader("Parlay Builder")
@@ -1206,6 +1423,72 @@ with tab_bank:
         st.altair_chart(eq_chart, use_container_width=True)
     else:
         st.caption("Settle some bets to see your equity curve.")
+
+    # Daily P&L heat-map (last 12 weeks, GitHub-style)
+    daily_pnl = {}
+    for b in settled:
+        ts = b.get("settled_at") or b.get("created_at") or ""
+        day = ts[:10]
+        if not day:
+            continue
+        delta = b["to_win"] if b["status"] == "won" else -b["stake"]
+        daily_pnl[day] = daily_pnl.get(day, 0.0) + delta
+
+    today_d = datetime.now(timezone.utc).date()
+    weeks_back = 12
+    total_days = weeks_back * 7
+    grid = []
+    for i in range(total_days - 1, -1, -1):
+        d = today_d - timedelta(days=i)
+        weeks_ago = (today_d - d).days // 7
+        grid.append({
+            "date": d.isoformat(),
+            "weekday": d.strftime("%a"),
+            "weekday_num": d.weekday(),
+            "weeks_ago": weeks_ago,
+            "pnl": daily_pnl.get(d.isoformat(), 0.0),
+        })
+    heat_df = pd.DataFrame(grid)
+    abs_max = max(20.0, heat_df["pnl"].abs().max())
+    weekday_order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+    heat = (
+        alt.Chart(heat_df)
+        .mark_rect(stroke=BG, strokeWidth=3, cornerRadius=3)
+        .encode(
+            x=alt.X(
+                "weeks_ago:O", sort="descending", title=None,
+                axis=alt.Axis(labels=False, ticks=False),
+            ),
+            y=alt.Y(
+                "weekday:O", sort=weekday_order, title=None,
+                axis=alt.Axis(
+                    labelColor="#94A3B8", ticks=False,
+                    domain=False, labelFontSize=10,
+                ),
+            ),
+            color=alt.Color(
+                "pnl:Q",
+                scale=alt.Scale(
+                    domain=[-abs_max, 0, abs_max],
+                    range=[RED, "#1F2937", GREEN],
+                ),
+                legend=None,
+            ),
+            tooltip=[
+                alt.Tooltip("date:N", title="Date"),
+                alt.Tooltip("pnl:Q", title="P&L", format="$,.2f"),
+            ],
+        )
+        .properties(
+            height=170, background=PANEL,
+            title=alt.TitleParams(
+                f"Daily P&L heat-map (last {weeks_back} weeks)",
+                color="#F8FAFC", anchor="start",
+            ),
+        )
+    )
+    st.altair_chart(heat, use_container_width=True)
 
     st.subheader("Log a single bet")
     with st.form("log_bet", clear_on_submit=True):
