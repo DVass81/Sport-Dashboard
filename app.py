@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import smtplib
+import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -181,6 +182,45 @@ def db_init():
         "CREATE INDEX IF NOT EXISTS idx_odds_key_ts "
         "ON odds_history(pick_key, ts)"
     )
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS kv (
+            k TEXT PRIMARY KEY,
+            v TEXT
+        )"""
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_get_kv(key, default=None):
+    _ensure_schema()
+    conn = db_conn()
+    cur = conn.cursor()
+    cur.execute(_q("SELECT v FROM kv WHERE k=?"), (key,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return default
+    return row[0]
+
+
+def db_set_kv(key, value):
+    _ensure_schema()
+    conn = db_conn()
+    cur = conn.cursor()
+    if _use_pg():
+        cur.execute(
+            _q(
+                "INSERT INTO kv (k,v) VALUES (?,?) "
+                "ON CONFLICT (k) DO UPDATE SET v=EXCLUDED.v"
+            ),
+            (key, str(value)),
+        )
+    else:
+        cur.execute(
+            "INSERT OR REPLACE INTO kv (k,v) VALUES (?,?)",
+            (key, str(value)),
+        )
     conn.commit()
     conn.close()
 
@@ -648,6 +688,163 @@ def weekly_report_card(bets, start_bankroll):
         ) +
         "</div>"
     )
+
+
+def card_style_for_pick(matchup):
+    if " @ " in (matchup or ""):
+        away, home = matchup.split(" @ ", 1)
+        c1, c2 = team_color(away), team_color(home)
+    else:
+        c1 = team_color(matchup or "default")
+        c2 = c1
+    return (
+        f"border-left:5px solid {c1}; "
+        f"background:linear-gradient(135deg,{c1}26 0%,#0F172A 65%,{c2}1F 100%);"
+    )
+
+
+def queue_prefill_bet(desc, book, odds, stake):
+    st.session_state["prefill"] = {
+        "desc": desc, "book": book,
+        "odds": int(odds), "stake": float(stake or 0.0),
+    }
+    st.toast(f"Queued: {desc[:60]} - open Bankroll to confirm.", icon="LOCK")
+
+
+_GRADE_LEAGUE_MAP = {
+    "NBA": ("basketball", "nba"),
+    "NFL": ("football", "nfl"),
+    "MLB": ("baseball", "mlb"),
+    "NHL": ("hockey", "nhl"),
+    "NCAAF": ("football", "college-football"),
+    "NCAAB": ("basketball", "mens-college-basketball"),
+}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_finals(league_id, date_iso):
+    mapping = _GRADE_LEAGUE_MAP.get(league_id)
+    if not mapping:
+        return []
+    sport, lg = mapping
+    yyyymmdd = date_iso.replace("-", "")
+    url = (
+        f"https://site.api.espn.com/apis/site/v2/sports/"
+        f"{sport}/{lg}/scoreboard?dates={yyyymmdd}"
+    )
+    out = []
+    try:
+        r = requests.get(url, timeout=8)
+        if r.status_code != 200:
+            return []
+        data = r.json() or {}
+        for ev in data.get("events", []):
+            comp = (ev.get("competitions") or [{}])[0]
+            status = ((comp.get("status") or {}).get("type") or {})
+            state = status.get("state", "")
+            if state != "post":
+                continue
+            cps = comp.get("competitors") or []
+            if len(cps) != 2:
+                continue
+            game = {"teams": {}, "total": 0.0}
+            for c in cps:
+                tname = ((c.get("team") or {}).get("displayName") or "").lower()
+                shortn = ((c.get("team") or {}).get("shortDisplayName")
+                          or "").lower()
+                abbr = ((c.get("team") or {}).get("abbreviation")
+                        or "").lower()
+                try:
+                    score = float(c.get("score") or 0)
+                except Exception:
+                    score = 0.0
+                game["teams"][tname] = {
+                    "score": score, "won": c.get("winner", False),
+                    "short": shortn, "abbr": abbr,
+                }
+                game["total"] += score
+            out.append(game)
+    except Exception:
+        return []
+    return out
+
+
+def _grade_one(desc, finals):
+    d = (desc or "").lower()
+    if not d or not finals:
+        return None
+    total_match = re.search(r"\b(over|under)\s+(\d+(?:\.\d+)?)", d)
+    if total_match:
+        side = total_match.group(1)
+        line = float(total_match.group(2))
+        for g in finals:
+            for tname in g["teams"]:
+                if tname and tname.split()[-1] in d:
+                    if side == "over":
+                        return "won" if g["total"] > line else (
+                            "push" if g["total"] == line else "lost"
+                        )
+                    return "won" if g["total"] < line else (
+                        "push" if g["total"] == line else "lost"
+                    )
+    spread_match = re.search(
+        r"([\-\+]\d+(?:\.\d+)?)", desc or ""
+    )
+    if spread_match:
+        spread = float(spread_match.group(1))
+        for g in finals:
+            for tname, info in g["teams"].items():
+                if not tname:
+                    continue
+                if tname.split()[-1] in d or info["short"] in d \
+                        or (info["abbr"] and info["abbr"] in d.split()):
+                    other = next(
+                        (v for k, v in g["teams"].items() if k != tname), None,
+                    )
+                    if not other:
+                        continue
+                    diff = info["score"] - other["score"] + spread
+                    if diff > 0:
+                        return "won"
+                    if diff < 0:
+                        return "lost"
+                    return "push"
+    if " ml" in f" {d} " or "moneyline" in d:
+        for g in finals:
+            for tname, info in g["teams"].items():
+                if tname and tname.split()[-1] in d:
+                    return "won" if info["won"] else "lost"
+    return None
+
+
+def auto_grade_open_bets(open_bets, active_leagues):
+    graded = {"won": 0, "lost": 0, "push": 0, "skipped": 0, "total": 0}
+    finals_by_lg = {}
+    dates_by_lg = {}
+    for b in open_bets:
+        date = b.get("date")
+        if not date:
+            graded["skipped"] += 1
+            continue
+        for lg in active_leagues:
+            dates_by_lg.setdefault(lg, set()).add(date)
+    for lg, dates in dates_by_lg.items():
+        finals_by_lg[lg] = []
+        for d in dates:
+            finals_by_lg[lg].extend(fetch_finals(lg, d))
+    for b in open_bets:
+        graded["total"] += 1
+        result = None
+        for lg in active_leagues:
+            result = _grade_one(b.get("description"), finals_by_lg.get(lg, []))
+            if result:
+                break
+        if result:
+            db_settle_bet(b["id"], result)
+            graded[result] += 1
+        else:
+            graded["skipped"] += 1
+    return graded
 
 
 def american_to_decimal(american):
@@ -1135,6 +1332,37 @@ section[data-testid="stSidebar"] { background: __PANEL__; }
 .report-tbl { width:100%; margin-top:14px; font-size:.85rem; border-collapse:collapse; }
 .report-tbl th { text-align:left; color:#94A3B8; font-weight:600; font-size:.72rem; text-transform:uppercase; letter-spacing:.06em; padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.08); }
 .report-tbl td { padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.04); }
+.ath-cannon {
+    background:linear-gradient(90deg,#FDE68A 0%,__GREEN__ 50%,#FDE68A 100%);
+    background-size:200% 100%;
+    color:#0B1220; font-weight:900; text-align:center;
+    padding:14px 18px; border-radius:14px; margin:14px 0 18px;
+    font-size:1.2rem; letter-spacing:.06em; text-transform:uppercase;
+    box-shadow:0 4px 30px rgba(34,197,94,.5),0 0 60px rgba(253,230,138,.4);
+    animation: athPulse 1.6s ease-in-out infinite, athShine 3s linear infinite;
+    position:relative; overflow:hidden;
+}
+.ath-cannon::before, .ath-cannon::after {
+    content:''; position:absolute; top:50%; width:8px; height:8px;
+    background:#F59E0B; border-radius:50%;
+    animation: athConfetti 2s linear infinite;
+}
+.ath-cannon::before { left:6%; animation-delay:0s; }
+.ath-cannon::after { right:6%; animation-delay:.5s; background:__GREEN__; }
+.ath-prev { font-size:.7rem; opacity:.7; font-weight:600; margin-left:10px; }
+@keyframes athPulse {
+    0%,100% { transform:scale(1); }
+    50% { transform:scale(1.02); }
+}
+@keyframes athShine {
+    0% { background-position:0% 50%; }
+    100% { background-position:200% 50%; }
+}
+@keyframes athConfetti {
+    0% { transform:translateY(-30px) scale(0); opacity:0; }
+    20% { opacity:1; }
+    100% { transform:translateY(50px) scale(1.2) rotate(360deg); opacity:0; }
+}
 .book-bar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom: 14px; }
 .book-link {
     display:inline-block; padding: 10px 16px; border-radius: 10px;
@@ -1606,8 +1834,10 @@ with tab_picks:
                 f"<span class='pick-sub' style='margin-right:6px;'>line</span>{spark}"
                 if spark else ""
             )
+            card_style = card_style_for_pick(r["matchup"])
             card = (
-                "<div class='pick-card'><div class='pick-row'>"
+                f"<div class='pick-card' style=\"{card_style}\">"
+                "<div class='pick-row'>"
                 "<div>"
                 f"<div class='pick-title'>{matchup_badges(r['matchup'])} "
                 f"<span class='muted' style='font-size:.85rem;'>"
@@ -1626,6 +1856,16 @@ with tab_picks:
                 "</div></div></div>"
             )
             st.markdown(card, unsafe_allow_html=True)
+            if capped > 0:
+                lock_key = f"lock_team_{r['league']}_{r['matchup']}_{r['pick']}"
+                if st.button(
+                    "Lock it in", key=lock_key, type="secondary",
+                ):
+                    queue_prefill_bet(
+                        f"{r['pick']} ({r['market']}) - "
+                        f"{r['matchup']} {r['league']}",
+                        r["book"], r["price"], capped,
+                    )
         if running >= daily_cap:
             st.caption(
                 f"Daily cap of ${daily_cap:,.2f} reached. Remaining picks shown as Pass."
@@ -1666,8 +1906,10 @@ with tab_props:
                 if spark else ""
             )
             trend_html = prop_trend_chip(prop_key)
+            card_style = card_style_for_pick(r.get("matchup", ""))
             card = (
-                "<div class='pick-card'><div class='pick-row'>"
+                f"<div class='pick-card' style=\"{card_style}\">"
+                "<div class='pick-row'>"
                 "<div>"
                 f"<div class='pick-title'>"
                 f"{player_avatar(r['player'], r.get('matchup', ''))}"
@@ -1689,6 +1931,16 @@ with tab_props:
                 "</div></div></div>"
             )
             st.markdown(card, unsafe_allow_html=True)
+            if stake > 0:
+                lock_key = f"lock_prop_{prop_key}"
+                if st.button(
+                    "Lock it in", key=lock_key, type="secondary",
+                ):
+                    queue_prefill_bet(
+                        f"{r['player']} {r['stat']} {r['side']} "
+                        f"{r['line']:g} - {r['matchup']} {r['league']}",
+                        r["book"], r["price"], stake,
+                    )
 
 with tab_pp_board:
     st.subheader("PrizePicks Board Builder")
@@ -1962,6 +2214,22 @@ with tab_bank:
         weekly_report_card(bets, bankroll), unsafe_allow_html=True,
     )
 
+    try:
+        prev_ath = float(db_get_kv("ath", str(bankroll)) or bankroll)
+    except Exception:
+        prev_ath = bankroll
+    if equity > prev_ath and equity > bankroll:
+        db_set_kv("ath", f"{equity:.2f}")
+        if not st.session_state.get("ath_seen") == round(equity, 2):
+            st.session_state["ath_seen"] = round(equity, 2)
+            st.balloons()
+            st.markdown(
+                f"<div class='ath-cannon'>NEW ALL-TIME HIGH "
+                f"${equity:,.2f} <span class='ath-prev'>prev "
+                f"${prev_ath:,.2f}</span></div>",
+                unsafe_allow_html=True,
+            )
+
     fx = st.session_state.pop("fx", None)
     if fx == "win":
         st.balloons()
@@ -2150,13 +2418,28 @@ with tab_bank:
     st.altair_chart(heat, use_container_width=True)
 
     st.subheader("Log a single bet")
+    pre = st.session_state.get("prefill", {})
+    if pre:
+        st.info(
+            f"Pick queued from a Lock-it-in button. Review and click Add bet.",
+            icon="LOCK",
+        )
     with st.form("log_bet", clear_on_submit=True):
         f = st.columns([2, 2, 1, 1, 1])
-        desc = f[0].text_input("Description", placeholder="e.g. Lakers ML")
-        book = f[1].text_input("Book", placeholder="draftkings / fanduel / bet365")
-        odds = f[2].number_input("American odds", value=-110, step=5)
+        desc = f[0].text_input(
+            "Description", value=pre.get("desc", ""),
+            placeholder="e.g. Lakers ML",
+        )
+        book = f[1].text_input(
+            "Book", value=pre.get("book", ""),
+            placeholder="draftkings / fanduel / bet365",
+        )
+        odds = f[2].number_input(
+            "American odds", value=int(pre.get("odds", -110)), step=5,
+        )
         stake = f[3].number_input(
-            "Stake ($)", min_value=0.0, value=min_bet, step=1.0,
+            "Stake ($)", min_value=0.0,
+            value=float(pre.get("stake", min_bet)), step=1.0,
         )
         submit = f[4].form_submit_button("Add bet", type="primary")
         if submit and desc:
@@ -2174,7 +2457,37 @@ with tab_bank:
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
             db_insert_bet(bet)
+            st.session_state.pop("prefill", None)
             st.rerun()
+
+    st.subheader("Auto-grade open bets")
+    ag_l, ag_r = st.columns([3, 1])
+    with ag_l:
+        st.caption(
+            "Pulls final scores from ESPN and settles open bets that match a "
+            "team and date (moneylines, spreads, totals). Player props won't "
+            "be auto-graded - settle those manually below."
+        )
+    with ag_r:
+        if st.button(
+            "Grade now", use_container_width=True, type="primary",
+            key="auto_grade_btn",
+        ):
+            open_bets_for_grade = [b for b in bets if b["status"] == "open"]
+            if not open_bets_for_grade:
+                st.info("No open bets to grade.")
+            else:
+                with st.spinner("Fetching final scores..."):
+                    res = auto_grade_open_bets(
+                        open_bets_for_grade, leagues_filter,
+                    )
+                st.success(
+                    f"Graded {res['won'] + res['lost'] + res['push']} of "
+                    f"{res['total']} - won {res['won']}, lost {res['lost']}, "
+                    f"push {res['push']}, skipped {res['skipped']}."
+                )
+                st.rerun()
+    st.markdown("&nbsp;", unsafe_allow_html=True)
 
     st.subheader("Daily Recap Email")
     smtp_ok = bool(
