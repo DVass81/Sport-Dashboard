@@ -1,12 +1,11 @@
 """Edge - Sports Betting Dashboard (Streamlit)"""
 from __future__ import annotations
 
-import math
 import os
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from math import prod
 
 import altair as alt
@@ -30,6 +29,11 @@ SPORTSBOOK_LINKS = [
     {"name": "Bet365",     "url": "https://www.bet365.com/",           "color": "#F2C100"},
     {"name": "PrizePicks", "url": "https://app.prizepicks.com/",       "color": "#7B43F4"},
 ]
+BOOK_COLOR = {
+    "draftkings": "#53D337",
+    "fanduel":    "#1493FF",
+    "bet365":     "#F2C100",
+}
 
 SGO_BASE = "https://api.sportsgameodds.com/v2"
 DB_PATH = os.environ.get("EDGE_DB_PATH", "edge_bets.db")
@@ -61,6 +65,18 @@ def db_conn():
             created_at TEXT,
             settled_at TEXT
         )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS odds_history (
+            pick_key TEXT,
+            ts TEXT,
+            best_dec REAL,
+            best_american INTEGER
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_odds_key_ts "
+        "ON odds_history(pick_key, ts)"
     )
     conn.commit()
     return conn
@@ -102,6 +118,70 @@ def db_delete_bet(bet_id):
     conn = db_conn()
     conn.execute("DELETE FROM bets WHERE id=?", (bet_id,))
     conn.commit()
+
+
+def pick_key_team(r):
+    return f"team|{r['league']}|{r['matchup']}|{r['market']}|{r['pick']}"
+
+
+def pick_key_prop(r):
+    return (
+        f"prop|{r['league']}|{r['matchup']}|{r['player']}|"
+        f"{r['stat']}|{r['line']:g}|{r['side']}"
+    )
+
+
+def db_snapshot(rows, kind):
+    if not rows:
+        return
+    conn = db_conn()
+    ts = datetime.now(timezone.utc).isoformat()
+    data = []
+    for r in rows:
+        key = pick_key_team(r) if kind == "team" else pick_key_prop(r)
+        try:
+            data.append((key, ts, float(r["best_dec"]), int(round(r["price"]))))
+        except (TypeError, ValueError):
+            continue
+    if not data:
+        return
+    conn.executemany(
+        "INSERT INTO odds_history(pick_key, ts, best_dec, best_american) "
+        "VALUES (?,?,?,?)",
+        data,
+    )
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    conn.execute("DELETE FROM odds_history WHERE ts < ?", (cutoff,))
+    conn.commit()
+
+
+def db_history(key, limit=30):
+    conn = db_conn()
+    rows = conn.execute(
+        "SELECT best_dec FROM odds_history WHERE pick_key=? "
+        "ORDER BY ts DESC LIMIT ?",
+        (key, limit),
+    ).fetchall()
+    return [r["best_dec"] for r in reversed(rows)]
+
+
+def svg_sparkline(values, w=120, h=28):
+    if len(values) < 2:
+        return ""
+    vmin, vmax = min(values), max(values)
+    span = (vmax - vmin) or 1.0
+    pts = []
+    for i, v in enumerate(values):
+        x = (i / (len(values) - 1)) * w
+        y = h - ((v - vmin) / span) * (h - 4) - 2
+        pts.append(f"{x:.1f},{y:.1f}")
+    color = GREEN if values[-1] >= values[0] else RED
+    return (
+        f"<svg width='{w}' height='{h}' "
+        "style='vertical-align:middle; margin-left:6px;'>"
+        f"<polyline fill='none' stroke='{color}' stroke-width='1.8' "
+        f"points='{' '.join(pts)}'/></svg>"
+    )
 
 
 def get_secret(name):
@@ -256,10 +336,8 @@ def _team_name(ev, side):
     t = (ev.get("teams") or {}).get(side) or {}
     names = t.get("names") or {}
     return (
-        names.get("long")
-        or names.get("short")
-        or names.get("medium")
-        or side.title()
+        names.get("long") or names.get("short")
+        or names.get("medium") or side.title()
     )
 
 
@@ -457,6 +535,10 @@ def all_picks(books_filter, kind):
     return rows
 
 
+# ---------------------------------------------------------------------------
+# UI
+# ---------------------------------------------------------------------------
+
 st.set_page_config(
     page_title="Edge - Sports Betting Dashboard",
     page_icon="🏈",
@@ -478,6 +560,17 @@ section[data-testid="stSidebar"] { background: __PANEL__; }
 }
 .edge-header h1 { margin:0; font-size: 1.6rem; }
 .edge-header .tag { color: rgba(255,255,255,.85); font-size:.85rem; }
+.alert-banner {
+    background: linear-gradient(135deg, rgba(245,158,11,.18) 0%, rgba(158,27,50,.18) 100%);
+    border: 1px solid rgba(245,158,11,.5);
+    border-radius: 12px; padding: 12px 16px; margin-bottom: 12px;
+    color: #FDE68A; font-weight: 600;
+}
+.alert-banner .pill {
+    background: __AMBER__; color:#0B1220;
+    padding:2px 10px; border-radius:999px; font-size:.78rem;
+    margin-right:6px;
+}
 .ticker-wrap {
     background: __PANEL__; border-radius: 10px;
     border: 1px solid rgba(255,255,255,.08);
@@ -486,7 +579,7 @@ section[data-testid="stSidebar"] { background: __PANEL__; }
 }
 .ticker {
     display: inline-block; white-space: nowrap; padding-left: 100%;
-    animation: ticker-scroll 40s linear infinite;
+    animation: ticker-scroll 90s linear infinite;
     font-variant-numeric: tabular-nums;
 }
 .ticker .item { display:inline-block; padding: 0 28px; color:#E2E8F0; font-weight:600; }
@@ -536,6 +629,7 @@ CSS = (
        .replace("__CRIMSON__", CRIMSON)
        .replace("__MUTED__", MUTED)
        .replace("__GREEN__", GREEN)
+       .replace("__AMBER__", AMBER)
 )
 st.markdown(CSS, unsafe_allow_html=True)
 
@@ -565,6 +659,13 @@ with st.sidebar:
         )
     else:
         st.caption("Tiers: $1 speculative -> $10 high-confidence. Pass when no edge.")
+
+    st.markdown("---")
+    st.markdown("### Alerts")
+    alert_threshold = st.number_input(
+        "Flag picks above (bps)", min_value=0, value=200, step=25,
+        help="Picks with edge above this threshold get a banner at the top.",
+    )
 
     st.markdown("---")
     st.markdown("### Live data")
@@ -608,7 +709,35 @@ header_html = (
 )
 st.markdown(header_html, unsafe_allow_html=True)
 
+# Fetch + snapshot
 all_team_picks = all_picks(books_filter, kind="team")
+all_prop_picks = all_picks(books_filter, kind="player")
+db_snapshot(all_team_picks, "team")
+db_snapshot(all_prop_picks, "player")
+
+# Alerts banner
+alerted = [
+    r for r in all_team_picks
+    if alert_threshold > 0 and r["edge_bps"] >= alert_threshold
+][:6]
+if alerted:
+    chips = ""
+    for r in alerted:
+        chips += (
+            f"<span class='pill'>{format_bps(r['edge_bps'])}</span>"
+            f"{r['matchup']} - <b>{r['pick']}</b> "
+            f"({format_american(r['price'])} on {r['book']})"
+            "<br/>"
+        )
+    banner = (
+        "<div class='alert-banner'>"
+        f"&#9888; {len(alerted)} pick(s) above {alert_threshold} bps<br/>"
+        f"{chips}"
+        "</div>"
+    )
+    st.markdown(banner, unsafe_allow_html=True)
+
+# Live ticker
 top_for_ticker = [r for r in all_team_picks if r["edge_bps"] > 0][:8]
 if top_for_ticker:
     items = ""
@@ -628,6 +757,7 @@ if top_for_ticker:
     )
     st.markdown(ticker_html, unsafe_allow_html=True)
 
+# Sportsbook quick-launch
 links_html = "<div class='book-bar'>"
 for b in SPORTSBOOK_LINKS:
     links_html += (
@@ -665,6 +795,7 @@ with tab_picks:
     st.markdown("&nbsp;", unsafe_allow_html=True)
 
     if sized:
+        # Confidence donut
         tier_counts = {}
         for _, _, tier, _ in sized:
             tier_counts[tier] = tier_counts.get(tier, 0) + 1
@@ -675,7 +806,7 @@ with tab_picks:
                  "Speculative", "Pass"]
         donut = (
             alt.Chart(donut_df)
-            .mark_arc(innerRadius=60, outerRadius=110, stroke=BG, strokeWidth=2)
+            .mark_arc(innerRadius=50, outerRadius=95, stroke=BG, strokeWidth=2)
             .encode(
                 theta=alt.Theta("Count:Q"),
                 color=alt.Color(
@@ -699,15 +830,15 @@ with tab_picks:
             )
         )
 
+        # Edge histogram
         edge_df = pd.DataFrame([{"Edge_bps": r["edge_bps"]} for r in rows])
         hist = (
             alt.Chart(edge_df)
             .mark_bar(color=CRIMSON, stroke=BG, strokeWidth=1)
             .encode(
                 x=alt.X(
-                    "Edge_bps:Q",
-                    bin=alt.Bin(maxbins=24),
-                    title="Edge (basis points)",
+                    "Edge_bps:Q", bin=alt.Bin(maxbins=24),
+                    title="Edge (bps)",
                     axis=alt.Axis(labelColor="#94A3B8", titleColor="#E2E8F0"),
                 ),
                 y=alt.Y(
@@ -724,9 +855,61 @@ with tab_picks:
             )
         )
 
-        ch1, ch2 = st.columns(2)
+        # Sportsbook scorecard
+        book_counts = {}
+        for r in rows:
+            if r["edge_bps"] > 0:
+                b = r["book"].lower()
+                book_counts[b] = book_counts.get(b, 0) + 1
+        if book_counts:
+            sb_df = pd.DataFrame([
+                {"Book": b, "Best price wins": c}
+                for b, c in book_counts.items()
+            ]).sort_values("Best price wins", ascending=False)
+            books_order = sb_df["Book"].tolist()
+            color_range = [BOOK_COLOR.get(b, CRIMSON) for b in books_order]
+            sb_chart = (
+                alt.Chart(sb_df)
+                .mark_bar(stroke=BG, strokeWidth=1, cornerRadiusEnd=4)
+                .encode(
+                    x=alt.X(
+                        "Book:N", sort=books_order, title=None,
+                        axis=alt.Axis(
+                            labelColor="#E2E8F0", labelAngle=0,
+                            titleColor="#F8FAFC",
+                        ),
+                    ),
+                    y=alt.Y(
+                        "Best price wins:Q", title="Times best",
+                        axis=alt.Axis(
+                            labelColor="#94A3B8", titleColor="#E2E8F0",
+                        ),
+                    ),
+                    color=alt.Color(
+                        "Book:N",
+                        scale=alt.Scale(domain=books_order, range=color_range),
+                        legend=None,
+                    ),
+                    tooltip=["Book", "Best price wins"],
+                )
+                .properties(
+                    height=240, background=PANEL,
+                    title=alt.TitleParams(
+                        "Sportsbook scorecard",
+                        color="#F8FAFC", anchor="start",
+                    ),
+                )
+            )
+        else:
+            sb_chart = None
+
+        ch1, ch2, ch3 = st.columns(3)
         ch1.altair_chart(donut, use_container_width=True)
         ch2.altair_chart(hist, use_container_width=True)
+        if sb_chart is not None:
+            ch3.altair_chart(sb_chart, use_container_width=True)
+        else:
+            ch3.info("No book wins yet.")
 
     if not rows:
         st.info("No bets to suggest right now. Check that your API key is set.")
@@ -739,6 +922,11 @@ with tab_picks:
             running += capped
             stake_txt = f"${capped:,.2f}" if capped > 0 else "Pass"
             stake_color = color if capped > 0 else RED
+            spark = svg_sparkline(db_history(pick_key_team(r)))
+            spark_html = (
+                f"<span class='pick-sub' style='margin-right:6px;'>line</span>{spark}"
+                if spark else ""
+            )
             card = (
                 "<div class='pick-card'><div class='pick-row'>"
                 "<div>"
@@ -747,6 +935,7 @@ with tab_picks:
                 f"<div class='pick-sub'>Pick: <b style='color:#F8FAFC'>{r['pick']}</b> "
                 f"@ {format_american(r['price'])} on <b>{r['book']}</b> - "
                 f"{r['books_count']} books compared</div>"
+                f"<div style='margin-top:6px;'>{spark_html}</div>"
                 "</div>"
                 "<div style='text-align:right;'>"
                 f"<span class='pill' style='background:{color}'>{tier}</span>"
@@ -767,13 +956,33 @@ with tab_props:
         "PrizePicks doesn't publish a public API. These are player props from "
         "sportsbook feeds, ranked by edge - use them as a shortlist for PrizePicks."
     )
-    prop_rows = all_picks(books_filter, kind="player")
+    search_q = st.text_input(
+        "Search player", placeholder="e.g. LeBron, Mahomes, Judge...",
+        key="prop_search",
+    ).strip().lower()
+
+    prop_rows = all_prop_picks
+    if search_q:
+        prop_rows = [
+            r for r in prop_rows
+            if r.get("player") and search_q in r["player"].lower()
+        ]
+        st.caption(f"{len(prop_rows)} match(es) for '{search_q}'.")
+
     if not prop_rows:
-        st.info("No player props are coming through the feed right now.")
+        if search_q:
+            st.info("No matching players in the current feed.")
+        else:
+            st.info("No player props are coming through the feed right now.")
     else:
         for r in prop_rows[:25]:
             stake, tier, color = size_pick(r)
             stake_txt = f"${stake:,.2f}" if stake > 0 else "Pass"
+            spark = svg_sparkline(db_history(pick_key_prop(r)))
+            spark_html = (
+                f"<span class='pick-sub' style='margin-right:6px;'>line</span>{spark}"
+                if spark else ""
+            )
             card = (
                 "<div class='pick-card'><div class='pick-row'>"
                 "<div>"
@@ -782,6 +991,7 @@ with tab_props:
                 f"<div class='pick-sub'>{r['matchup']} - {r['league']} - "
                 f"best @ {format_american(r['price'])} on {r['book']} - "
                 f"{r['books_count']} books</div>"
+                f"<div style='margin-top:6px;'>{spark_html}</div>"
                 "</div>"
                 "<div style='text-align:right;'>"
                 f"<span class='pill' style='background:{color}'>{tier}</span>"
