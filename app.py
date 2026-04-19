@@ -10,7 +10,7 @@ import requests
 import streamlit as st
 
 st.set_page_config(
-    page_title="Crimson Sports Dashboard",
+    page_title="Sports Betting Dashboard",
     page_icon="🐘",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -1210,7 +1210,7 @@ def plot_profit_by_sportsbook(settled_df):
         return None
     summary = settled_df.groupby("Sportsbook", as_index=False)["PNL"].sum().sort_values("PNL", ascending=False)
     fig = px.bar(summary, x="Sportsbook", y="PNL", title="Profit / Loss by Sportsbook")
-    fig.update_traces(marker_color="#9E1B32")
+    fig.update_traces(marker_color="#1D4E89")
     return style_figure(fig)
 
 
@@ -1219,7 +1219,7 @@ def plot_profit_by_market(settled_df):
         return None
     summary = settled_df.groupby("Market Bucket", as_index=False)["PNL"].sum().sort_values("PNL", ascending=False)
     fig = px.bar(summary, x="Market Bucket", y="PNL", title="Profit / Loss by Market Type")
-    fig.update_traces(marker_color="#D1495B")
+    fig.update_traces(marker_color="#5FA8D3")
     fig.update_xaxes(tickangle=-30)
     return style_figure(fig)
 
@@ -1253,7 +1253,7 @@ def plot_exposure_by_book(final_bets):
         return None
     summary = final_bets.groupby("Sportsbook", as_index=False)["Stake To Bet"].sum().sort_values("Stake To Bet", ascending=False)
     fig = px.pie(summary, names="Sportsbook", values="Stake To Bet", title="Open Suggested Exposure by Sportsbook", hole=0.45)
-    fig.update_traces(textinfo="label+percent", marker=dict(colors=["#9E1B32", "#D1495B", "#0B2545", "#5FA8D3"]))
+    fig.update_traces(textinfo="label+percent", marker=dict(colors=["#1D4E89", "#5FA8D3", "#0B2545", "#5FA8D3"]))
     return style_figure(fig)
 
 
@@ -1262,7 +1262,7 @@ def plot_edge_distribution(current_rows):
     if bets.empty:
         return None
     fig = px.histogram(bets, x="Edge %", nbins=15, title="Edge Distribution of Final Bets")
-    fig.update_traces(marker_color="#9E1B32")
+    fig.update_traces(marker_color="#1D4E89")
     return style_figure(fig)
 
 
@@ -1277,7 +1277,7 @@ def plot_score_vs_pnl(settled_df):
         color="Result",
         hover_data=["Event", "Pick", "Sportsbook", "Confidence"],
         title="Bet Score vs Result P/L",
-        color_discrete_map={"Win": "#1D4E89", "Loss": "#D1495B"},
+        color_discrete_map={"Win": "#1D4E89", "Loss": "#5FA8D3"},
     )
     return style_figure(fig)
 
@@ -1288,7 +1288,7 @@ def plot_line_gap_leaderboard(compare_df):
     top = compare_df.head(12).copy()
     top["Label"] = top["Pick"] + " | " + top["Best Sportsbook"].fillna("")
     fig = px.bar(top, x="Line Gap %", y="Label", orientation="h", title="Top Line-Gap Shopping Opportunities")
-    fig.update_traces(marker_color="#9E1B32")
+    fig.update_traces(marker_color="#1D4E89")
     fig.update_yaxes(categoryorder="total ascending")
     return style_figure(fig, height=450)
 
@@ -1313,7 +1313,7 @@ def plot_line_heatmap(all_rows, compare_df):
         pivot,
         aspect="auto",
         text_auto=".2f",
-        color_continuous_scale=["#EAF1FB", "#9EC5E5", "#D1495B", "#9E1B32"],
+        color_continuous_scale=["#EAF1FB", "#9EC5E5", "#5FA8D3", "#1D4E89"],
         title="Best-Line Heatmap (Lower Implied Prob = Better Price)",
     )
     fig.update_xaxes(side="top")
@@ -1330,6 +1330,16 @@ def plot_observed_clv(settled_or_pending_log):
     fig = px.bar(summary, x="CLV Label", y="Observed CLV %", title="Observed CLV by Market Position")
     fig.update_traces(marker_color="#1D4E89")
     return style_figure(fig)
+
+
+def build_explain_bet_prompt(row):
+    return (
+        f"Explain this bet in plain English for me: {row['Pick']} in {row['Event']} at {row['Sportsbook']} {row['Odds']}. "
+        f"Use the dashboard logic only. Cover the edge ({row['Edge %']:.2f}%), bet score ({row['Bet Score']:.2f}), "
+        f"confidence ({row['Confidence']}), line trend ({row['Line Trend']}), line move ({row['Line Move %']:.2f}%), "
+        f"books quoting ({int(row['Books Quoting'])}), recommended stake (${int(row['Stake To Bet'])}), and any allocation or correlation notes. "
+        f"Finish with a clear bottom-line verdict on why it is a bet or why I should still be cautious."
+    )
 
 
 def build_dashboard_context(current_df, compare_df, pending_log, settled_log, bankroll, max_total_exposure):
@@ -1508,15 +1518,15 @@ st.markdown(
     <style>
     .stApp {
         background:
-            radial-gradient(circle at top left, rgba(158,27,50,0.25), transparent 28%),
-            radial-gradient(circle at top right, rgba(255,255,255,0.08), transparent 20%),
-            linear-gradient(180deg, #5C1021 0%, #7A1630 55%, #8E1B36 100%);
-        color: #0B2545;
+            radial-gradient(circle at top left, rgba(95,168,211,0.16), transparent 26%),
+            radial-gradient(circle at top right, rgba(29,78,137,0.10), transparent 22%),
+            linear-gradient(180deg, #F7F9FC 0%, #EEF4FA 52%, #E7F0F8 100%);
+        color: #111827;
     }
 
     section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #FAF7F8 0%, #F3EEF1 100%);
-        border-right: 3px solid rgba(158,27,50,0.25);
+        background: linear-gradient(180deg, #FFFFFF 0%, #F4F8FC 100%);
+        border-right: 2px solid rgba(29,78,137,0.12);
     }
 
     section[data-testid="stSidebar"] * {
@@ -1528,24 +1538,24 @@ st.markdown(
         font-size: 3.0rem;
         font-weight: 900;
         color: #0B2545;
-        background: rgba(255,255,255,0.94);
-        border-left: 8px solid #9E1B32;
+        background: rgba(255,255,255,0.97);
+        border-left: 8px solid #1D4E89;
         border-radius: 16px;
         padding: 12px 18px;
         margin-bottom: 0.35rem;
         letter-spacing: 0.5px;
-        box-shadow: 0 10px 24px rgba(0, 0, 0, 0.14);
+        box-shadow: 0 10px 24px rgba(11, 37, 69, 0.10);
     }
 
     .sub-title {
         display: inline-block;
         font-size: 1.02rem;
         color: #0B2545;
-        background: rgba(255,255,255,0.92);
+        background: rgba(255,255,255,0.95);
         border-radius: 14px;
         padding: 8px 14px;
         margin-bottom: 1rem;
-        box-shadow: 0 8px 18px rgba(0, 0, 0, 0.10);
+        box-shadow: 0 8px 18px rgba(11, 37, 69, 0.08);
     }
 
     .theme-banner,
@@ -1554,44 +1564,44 @@ st.markdown(
     .best-bet,
     .note-box,
     .link-card {
-        color: #0B2545;
+        color: #111827;
     }
 
     .theme-banner {
-        background: linear-gradient(180deg, #FFF8FA 0%, #F6EEF1 100%);
+        background: linear-gradient(180deg, #FFFFFF 0%, #F4F8FC 100%);
         border: 1px solid rgba(11,37,69,0.08);
-        border-left: 6px solid #9E1B32;
+        border-left: 6px solid #1D4E89;
         border-radius: 16px;
         padding: 12px 16px;
         margin-bottom: 18px;
-        box-shadow: 0 10px 20px rgba(0, 0, 0, 0.10);
+        box-shadow: 0 10px 20px rgba(11, 37, 69, 0.08);
     }
 
     .hero-box {
-        background: linear-gradient(180deg, #FFF9FB 0%, #F5EFF2 100%);
-        border: 2px solid rgba(158,27,50,0.18);
+        background: linear-gradient(180deg, #FFFFFF 0%, #F5F8FD 100%);
+        border: 2px solid rgba(29,78,137,0.14);
         border-radius: 22px;
         padding: 20px 24px;
         margin-bottom: 18px;
-        box-shadow: 0 12px 28px rgba(0, 0, 0, 0.16);
+        box-shadow: 0 12px 28px rgba(11, 37, 69, 0.10);
     }
 
     .card {
-        background: rgba(255, 255, 255, 0.93);
+        background: rgba(255, 255, 255, 0.97);
         border: 1px solid rgba(11, 37, 69, 0.08);
         border-radius: 18px;
         padding: 18px;
-        box-shadow: 0 8px 20px rgba(0,0,0,0.12);
+        box-shadow: 0 8px 20px rgba(11,37,69,0.08);
         margin-bottom: 16px;
     }
 
     .best-bet {
-        background: linear-gradient(180deg, #FFFFFF 0%, #F7F3F5 100%);
-        border: 2px solid rgba(158,27,50,0.18);
-        border-left: 8px solid #9E1B32;
+        background: linear-gradient(180deg, #FFFFFF 0%, #F5F8FD 100%);
+        border: 2px solid rgba(29,78,137,0.16);
+        border-left: 8px solid #1D4E89;
         border-radius: 18px;
         padding: 18px;
-        box-shadow: 0 10px 22px rgba(0, 0, 0, 0.12);
+        box-shadow: 0 10px 22px rgba(11, 37, 69, 0.09);
         margin-bottom: 16px;
     }
 
@@ -1616,12 +1626,12 @@ st.markdown(
     }
 
     .note-box {
-        background: rgba(255,255,255,0.92);
-        border-left: 6px solid #9E1B32;
+        background: rgba(255,255,255,0.95);
+        border-left: 6px solid #1D4E89;
         border-radius: 12px;
         padding: 12px 14px;
         margin: 14px 0;
-        box-shadow: 0 8px 18px rgba(0,0,0,0.10);
+        box-shadow: 0 8px 18px rgba(11,37,69,0.08);
     }
 
     .kpi-note {
@@ -1633,11 +1643,11 @@ st.markdown(
     }
 
     .stMetric {
-        background: rgba(255,255,255,0.94);
+        background: rgba(255,255,255,0.97);
         border: 1px solid rgba(11,37,69,0.08);
         border-radius: 16px;
         padding: 8px 10px;
-        box-shadow: 0 8px 16px rgba(0,0,0,0.10);
+        box-shadow: 0 8px 16px rgba(11,37,69,0.08);
     }
 
     [data-testid="stMetricValue"],
@@ -1665,7 +1675,7 @@ st.markdown(
     }
 
     .stTabs [data-baseweb="tab"] {
-        background: rgba(255,255,255,0.88);
+        background: rgba(255,255,255,0.92);
         border: 1px solid rgba(11,37,69,0.10);
         border-radius: 12px;
         color: #0B2545 !important;
@@ -1693,10 +1703,10 @@ st.markdown(
     .link-card {
         background: linear-gradient(180deg, #FFFFFF 0%, #F5F8FD 100%);
         border: 1px solid rgba(11,37,69,0.10);
-        border-left: 8px solid #9E1B32;
+        border-left: 8px solid #1D4E89;
         border-radius: 18px;
         padding: 20px;
-        box-shadow: 0 10px 22px rgba(0,0,0,0.12);
+        box-shadow: 0 10px 22px rgba(11,37,69,0.08);
         min-height: 185px;
         margin-bottom: 14px;
     }
@@ -1731,7 +1741,7 @@ st.markdown(
     }
 
     [data-testid="stChatMessage"] {
-        background: rgba(255,255,255,0.92);
+        background: rgba(255,255,255,0.94);
         border: 1px solid rgba(11,37,69,0.08);
         border-radius: 16px;
         padding: 6px 8px;
@@ -1757,10 +1767,11 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
 # -----------------------------
 # SIDEBAR CONTROLS
 # -----------------------------
-st.sidebar.title("🐘 Alabama-Style Controls")
+st.sidebar.title("🎯 Dashboard Controls")
 
 bankroll = st.sidebar.number_input("Starting Bankroll", min_value=1.0, value=500.0, step=25.0)
 min_bet = st.sidebar.number_input("Minimum Bet", min_value=1.0, value=1.0, step=1.0)
@@ -1816,13 +1827,13 @@ if st.sidebar.button("Refresh now"):
 # -----------------------------
 # HEADER
 # -----------------------------
-st.markdown('<div class="main-title">🐘 Crimson Sports Betting Dashboard</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🎯 Sports Betting Dashboard</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="sub-title">KPI-first betting terminal with line shopping, exposure control, charts, and tracked performance.</div>',
+    '<div class="sub-title">KPI-first betting terminal with line shopping, exposure control, charts, tracked performance, and cleaner high-contrast styling.</div>',
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="theme-banner"><b>New in this version:</b> KPI ribbon, chart-first layout, best-line heatmap, exposure caps by sport/event/book, line movement tracking, observed CLV, and correlation controls.</div>',
+    '<div class="theme-banner"><b>Layout update:</b> light blue/white theme, darker readable text, sportsbook quick links, AI bet explanations, KPI ribbon, chart-first layout, best-line heatmap, exposure caps, line movement tracking, observed CLV, and correlation controls.</div>',
     unsafe_allow_html=True,
 )
 st.markdown(
@@ -2168,6 +2179,57 @@ with tabs[1]:
         },
     )
 
+
+    st.markdown('<div class="section-title">Explain a Selected Final Bet</div>', unsafe_allow_html=True)
+    explain_candidates = final_bets_live.copy()
+    if explain_candidates.empty:
+        st.info("No final bets available to explain right now.")
+    else:
+        explain_candidates["Explain Label"] = explain_candidates.apply(
+            lambda row: f"{row['Event']} | {row['Pick']} | {row['Sportsbook']} {row['Odds']} | Score {row['Bet Score']:.2f}",
+            axis=1,
+        )
+        selected_explain_label = st.selectbox(
+            "Choose a final bet to break down",
+            options=explain_candidates["Explain Label"].tolist(),
+            key="best_bets_explain_select",
+        )
+        selected_explain_row = explain_candidates.loc[
+            explain_candidates["Explain Label"] == selected_explain_label
+        ].iloc[0]
+
+        st.markdown(
+            f"""
+            <div class="card">
+            <b>{selected_explain_row['Pick']}</b><br>
+            {selected_explain_row['Event']} · {selected_explain_row['Market']}<br>
+            Sportsbook: <b>{selected_explain_row['Sportsbook']}</b> · Odds: <b>{selected_explain_row['Odds']}</b><br>
+            Edge: <b>{selected_explain_row['Edge %']:.2f}%</b> · Score: <b>{selected_explain_row['Bet Score']:.2f}</b> · Confidence: <b>{selected_explain_row['Confidence']}</b><br>
+            Stake To Bet: <b>${int(selected_explain_row['Stake To Bet'])}</b> · Status: <b>{selected_explain_row['Display Status']}</b>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        explain_chip_html = (
+            f'<span class="factor-chip">Edge {selected_explain_row["Edge %"]:.2f}%</span>'
+            f'<span class="factor-chip">Line Gap {selected_explain_row["Best Line Gap %"]:.2f}%</span>'
+            f'<span class="factor-chip">Books {int(selected_explain_row["Books Quoting"])}</span>'
+            f'<span class="factor-chip">Trend {selected_explain_row["Line Trend"]}</span>'
+            f'<span class="factor-chip">Move {selected_explain_row["Line Move %"]:.2f}%</span>'
+            f'<span class="factor-chip">Stake ${int(selected_explain_row["Stake To Bet"])}</span>'
+        )
+        st.markdown(explain_chip_html, unsafe_allow_html=True)
+        st.write(f"**Reason:** {selected_explain_row['Reason']}")
+        st.write(f"**Factor math:** {build_factor_text(selected_explain_row)}")
+        if selected_explain_row["Allocation Notes"]:
+            st.write(f"**Allocation note:** {selected_explain_row['Allocation Notes']}")
+        if selected_explain_row["Correlation Flag"]:
+            st.write(f"**Correlation flag:** {selected_explain_row['Correlation Flag']}")
+        if selected_explain_row["Opening Odds"]:
+            st.write(
+                f"**Line history:** opened at {selected_explain_row['Opening Odds']} and is now {selected_explain_row['Odds']} ({selected_explain_row['Line Trend']}, {selected_explain_row['Line Move %']:.2f}% implied-probability move)."
+            )
+
 # -----------------------------
 # COMPARE LINES TAB
 # -----------------------------
@@ -2365,6 +2427,40 @@ with tabs[8]:
         unsafe_allow_html=True,
     )
 
+    st.markdown('<div class="section-title">Explain a Bet with AI</div>', unsafe_allow_html=True)
+    ai_explain_candidates = final_bets_live.copy()
+    if ai_explain_candidates.empty:
+        st.info("No final bets are available for AI explanation right now.")
+    else:
+        ai_explain_candidates["Explain Label"] = ai_explain_candidates.apply(
+            lambda row: f"{row['Event']} | {row['Pick']} | {row['Sportsbook']} {row['Odds']} | Score {row['Bet Score']:.2f}",
+            axis=1,
+        )
+        ex1, ex2 = st.columns([3, 1])
+        with ex1:
+            selected_ai_explain_label = st.selectbox(
+                "Pick a final bet for AI to explain",
+                options=ai_explain_candidates["Explain Label"].tolist(),
+                key="ai_explain_select",
+            )
+        with ex2:
+            st.write("")
+            st.write("")
+            if st.button("Explain selected bet with AI", key="ai_explain_button"):
+                selected_ai_row = ai_explain_candidates.loc[
+                    ai_explain_candidates["Explain Label"] == selected_ai_explain_label
+                ].iloc[0]
+                run_ai_prompt(
+                    build_explain_bet_prompt(selected_ai_row),
+                    current_df=current_df,
+                    compare_df=compare_df,
+                    pending_log=pending_log,
+                    settled_log=settled_log,
+                    bankroll=bankroll,
+                    max_total_exposure=max_total_exposure,
+                )
+                st.rerun()
+
     preset_prompts = {
         "Safest bets now": "What are the safest bets on the board right now and why?",
         "Strongest edge": "Which current bets have the strongest edge and best line-shopping value?",
@@ -2372,6 +2468,7 @@ with tabs[8]:
         "Book compare": "Compare DraftKings, FanDuel, Bet365, and PrizePicks for today's best opportunities.",
         "Avoid list": "Which bets should I avoid right now and why?",
         "Bankroll summary": "Summarize my bankroll risk and tell me how aggressive I should be right now.",
+        "Explain top bet": "Explain the top-ranked final bet in plain English and tell me the main reasons it is ahead of the others.",
     }
 
     pcols = st.columns(3)
