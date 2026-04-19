@@ -1,7 +1,5 @@
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 from html import escape
-import re
 import xml.etree.ElementTree as ET
 
 import pandas as pd
@@ -44,77 +42,6 @@ LEAGUE_TO_NEWS = {
     "MLB": "MLB",
     "NHL": "NHL",
 }
-HEADLINE_POSITIVE_WORDS = {"streak", "streaking", "hot", "surge", "rolling", "dominant", "dominance", "healthy", "returns", "returning", "breakout", "heater", "homer", "home run", "wins", "winning"}
-HEADLINE_NEGATIVE_WORDS = {"injury", "injured", "out", "questionable", "doubtful", "miss", "missing", "slump", "cold", "struggle", "struggling", "scratch", "sits", "ruled out", "day-to-day"}
-HEADLINE_WEATHER_WORDS = {"rain", "wind", "snow", "weather", "storm", "cold", "heat"}
-HEADLINE_SURFACE_WORDS = {"turf", "grass", "surface"}
-HEADLINE_TIME_WORDS = {"morning", "afternoon", "night", "early", "late", "matinee"}
-HEADLINE_STREAK_WORDS = {"streak", "streaking", "heater", "homer", "home run", "hit streak", "hot"}
-EVENT_STOPWORDS = {"vs", "at", "the", "and", "for", "with", "from", "new", "los", "angeles", "san", "city", "york", "las", "vegas"}
-OUTDOOR_SPORTS = {"NFL", "MLB"}
-INDOOR_SPORTS = {"NBA", "NHL"}
-TEAM_ENV = {
-    "Cardinals": {"lat": 33.5275, "lon": -112.2626, "venue_type": "roofed", "surface": "grass"},
-    "Falcons": {"lat": 33.7554, "lon": -84.4011, "venue_type": "roofed", "surface": "turf"},
-    "Ravens": {"lat": 39.2780, "lon": -76.6227, "venue_type": "outdoor", "surface": "grass"},
-    "Bills": {"lat": 42.7738, "lon": -78.7868, "venue_type": "outdoor", "surface": "grass"},
-    "Panthers": {"lat": 35.2258, "lon": -80.8528, "venue_type": "outdoor", "surface": "grass"},
-    "Bears": {"lat": 41.8623, "lon": -87.6167, "venue_type": "outdoor", "surface": "grass"},
-    "Bengals": {"lat": 39.0954, "lon": -84.5160, "venue_type": "outdoor", "surface": "turf"},
-    "Browns": {"lat": 41.5061, "lon": -81.6995, "venue_type": "outdoor", "surface": "grass"},
-    "Cowboys": {"lat": 32.7473, "lon": -97.0945, "venue_type": "roofed", "surface": "turf"},
-    "Broncos": {"lat": 39.7439, "lon": -105.0201, "venue_type": "outdoor", "surface": "grass"},
-    "Lions": {"lat": 42.3400, "lon": -83.0456, "venue_type": "indoor", "surface": "turf"},
-    "Packers": {"lat": 44.5013, "lon": -88.0622, "venue_type": "outdoor", "surface": "grass"},
-    "Texans": {"lat": 29.6847, "lon": -95.4107, "venue_type": "roofed", "surface": "grass"},
-    "Colts": {"lat": 39.7601, "lon": -86.1639, "venue_type": "roofed", "surface": "turf"},
-    "Jaguars": {"lat": 30.3239, "lon": -81.6373, "venue_type": "outdoor", "surface": "grass"},
-    "Chiefs": {"lat": 39.0489, "lon": -94.4839, "venue_type": "outdoor", "surface": "grass"},
-    "Raiders": {"lat": 36.0908, "lon": -115.1830, "venue_type": "roofed", "surface": "grass"},
-    "Chargers": {"lat": 33.9535, "lon": -118.3392, "venue_type": "roofed", "surface": "turf"},
-    "Rams": {"lat": 33.9535, "lon": -118.3392, "venue_type": "roofed", "surface": "turf"},
-    "Dolphins": {"lat": 25.9580, "lon": -80.2389, "venue_type": "outdoor", "surface": "grass"},
-    "Vikings": {"lat": 44.9737, "lon": -93.2575, "venue_type": "indoor", "surface": "turf"},
-    "Patriots": {"lat": 42.0909, "lon": -71.2643, "venue_type": "outdoor", "surface": "turf"},
-    "Saints": {"lat": 29.9511, "lon": -90.0812, "venue_type": "roofed", "surface": "turf"},
-    "Giants": {"lat": 40.8135, "lon": -74.0745, "venue_type": "outdoor", "surface": "turf"},
-    "Jets": {"lat": 40.8135, "lon": -74.0745, "venue_type": "outdoor", "surface": "turf"},
-    "Eagles": {"lat": 39.9008, "lon": -75.1675, "venue_type": "outdoor", "surface": "grass"},
-    "Steelers": {"lat": 40.4468, "lon": -80.0158, "venue_type": "outdoor", "surface": "grass"},
-    "49ers": {"lat": 37.4030, "lon": -121.9700, "venue_type": "outdoor", "surface": "grass"},
-    "Seahawks": {"lat": 47.5952, "lon": -122.3316, "venue_type": "outdoor", "surface": "turf"},
-    "Buccaneers": {"lat": 27.9759, "lon": -82.5033, "venue_type": "outdoor", "surface": "grass"},
-    "Titans": {"lat": 36.1665, "lon": -86.7713, "venue_type": "outdoor", "surface": "grass"},
-    "Commanders": {"lat": 38.9078, "lon": -76.8644, "venue_type": "outdoor", "surface": "grass"},
-    "Diamondbacks": {"lat": 33.4453, "lon": -112.0667, "venue_type": "roofed", "surface": "grass"},
-    "Braves": {"lat": 33.8908, "lon": -84.4677, "venue_type": "outdoor", "surface": "grass"},
-    "Orioles": {"lat": 39.2840, "lon": -76.6217, "venue_type": "outdoor", "surface": "grass"},
-    "Red Sox": {"lat": 42.3467, "lon": -71.0972, "venue_type": "outdoor", "surface": "grass"},
-    "Cubs": {"lat": 41.9484, "lon": -87.6553, "venue_type": "outdoor", "surface": "grass"},
-    "White Sox": {"lat": 41.8300, "lon": -87.6338, "venue_type": "outdoor", "surface": "grass"},
-    "Reds": {"lat": 39.0979, "lon": -84.5082, "venue_type": "outdoor", "surface": "grass"},
-    "Guardians": {"lat": 41.4962, "lon": -81.6852, "venue_type": "outdoor", "surface": "grass"},
-    "Rockies": {"lat": 39.7559, "lon": -104.9942, "venue_type": "outdoor", "surface": "grass"},
-    "Tigers": {"lat": 42.3390, "lon": -83.0485, "venue_type": "outdoor", "surface": "grass"},
-    "Astros": {"lat": 29.7573, "lon": -95.3555, "venue_type": "roofed", "surface": "grass"},
-    "Royals": {"lat": 39.0517, "lon": -94.4803, "venue_type": "outdoor", "surface": "grass"},
-    "Angels": {"lat": 33.8003, "lon": -117.8827, "venue_type": "outdoor", "surface": "grass"},
-    "Dodgers": {"lat": 34.0739, "lon": -118.2400, "venue_type": "outdoor", "surface": "grass"},
-    "Marlins": {"lat": 25.7781, "lon": -80.2197, "venue_type": "roofed", "surface": "grass"},
-    "Brewers": {"lat": 43.0280, "lon": -87.9712, "venue_type": "roofed", "surface": "grass"},
-    "Twins": {"lat": 44.9817, "lon": -93.2775, "venue_type": "outdoor", "surface": "grass"},
-    "Mets": {"lat": 40.7571, "lon": -73.8458, "venue_type": "outdoor", "surface": "grass"},
-    "Yankees": {"lat": 40.8296, "lon": -73.9262, "venue_type": "outdoor", "surface": "grass"},
-    "Athletics": {"lat": 36.0668, "lon": -115.1780, "venue_type": "outdoor", "surface": "grass"},
-    "Phillies": {"lat": 39.9061, "lon": -75.1665, "venue_type": "outdoor", "surface": "grass"},
-    "Pirates": {"lat": 40.4469, "lon": -80.0057, "venue_type": "outdoor", "surface": "grass"},
-    "Padres": {"lat": 32.7073, "lon": -117.1573, "venue_type": "outdoor", "surface": "grass"},
-    "Mariners": {"lat": 47.5914, "lon": -122.3325, "venue_type": "roofed", "surface": "grass"},
-    "Rays": {"lat": 27.7682, "lon": -82.6534, "venue_type": "indoor", "surface": "turf"},
-    "Rangers": {"lat": 32.7473, "lon": -97.0847, "venue_type": "roofed", "surface": "turf"},
-    "Blue Jays": {"lat": 43.6414, "lon": -79.3894, "venue_type": "roofed", "surface": "turf"},
-    "Nationals": {"lat": 38.8730, "lon": -77.0074, "venue_type": "outdoor", "surface": "grass"},
-}
 
 
 def get_news_feed_names(leagues):
@@ -153,306 +80,6 @@ def fetch_news_feed(feed_name, limit=12):
         return []
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def fetch_news_items_for_leagues(leagues, per_feed=5):
-    items = []
-    for feed_name in get_news_feed_names(leagues):
-        items.extend(fetch_news_feed(feed_name, limit=per_feed))
-    return items
-
-
-def event_terms_from_row(row):
-    event_text = str(row.get("Event", "")).replace("@", " ")
-    tokens = []
-    for part in re.split(r"[^A-Za-z0-9]+", event_text.lower()):
-        part = part.strip()
-        if len(part) >= 3 and part not in EVENT_STOPWORDS:
-            tokens.append(part)
-    return list(dict.fromkeys(tokens))[:8]
-
-
-def daypart_from_start(value):
-    dt = parse_iso_datetime(value)
-    if dt is None:
-        return "Unknown"
-    eastern = dt.astimezone(ZoneInfo("America/New_York"))
-    hour = eastern.hour
-    if 5 <= hour < 11:
-        return "Morning"
-    if 11 <= hour < 16:
-        return "Afternoon"
-    if 16 <= hour < 21:
-        return "Evening"
-    return "Night"
-
-
-def build_headline_context(row, news_items):
-    terms = event_terms_from_row(row)
-    matched = []
-    for item in news_items or []:
-        haystack = f"{item.get('title', '')} {item.get('description', '')}".lower()
-        if any(term in haystack for term in terms):
-            matched.append(haystack)
-
-    joined = " || ".join(matched)
-    positive_hits = sum(1 for word in HEADLINE_POSITIVE_WORDS if word in joined)
-    negative_hits = sum(1 for word in HEADLINE_NEGATIVE_WORDS if word in joined)
-    weather_hits = sum(1 for word in HEADLINE_WEATHER_WORDS if word in joined)
-    surface_hits = sum(1 for word in HEADLINE_SURFACE_WORDS if word in joined)
-    streak_hits = sum(1 for word in HEADLINE_STREAK_WORDS if word in joined)
-    time_hits = sum(1 for word in HEADLINE_TIME_WORDS if word in joined)
-
-    tags = []
-    if positive_hits:
-        tags.append("Positive News")
-    if negative_hits:
-        tags.append("Injury / Risk News")
-    if weather_hits:
-        tags.append("Weather Watch")
-    if surface_hits:
-        tags.append("Surface Note")
-    if streak_hits:
-        tags.append("Streak Signal")
-    if time_hits:
-        tags.append("Timing Angle")
-
-    return {
-        "headline_matches": len(matched),
-        "positive_hits": positive_hits,
-        "negative_hits": negative_hits,
-        "weather_hits": weather_hits,
-        "surface_hits": surface_hits,
-        "streak_hits": streak_hits,
-        "time_hits": time_hits,
-        "tags": tags,
-    }
-
-
-def default_team_env(row):
-    sport = str(row.get("Sport", ""))
-    if sport in INDOOR_SPORTS:
-        return {"venue_type": "indoor", "surface": "hardcourt" if sport == "NBA" else "ice"}
-    return {"venue_type": "outdoor", "surface": "grass"}
-
-
-def team_environment(row):
-    home_team = str(row.get("Home Team", ""))
-    env = TEAM_ENV.get(home_team)
-    return env if env else default_team_env(row)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_weather_snapshot(lat, lon, start_time):
-    if lat is None or lon is None or not start_time:
-        return {}
-    dt = parse_iso_datetime(start_time)
-    if dt is None:
-        return {}
-    try:
-        resp = requests.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": lat,
-                "longitude": lon,
-                "hourly": "temperature_2m,precipitation_probability,precipitation,wind_speed_10m",
-                "forecast_days": 7,
-                "timezone": "UTC",
-            },
-            timeout=20,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        hourly = data.get("hourly", {})
-        times = hourly.get("time", [])
-        if not times:
-            return {}
-        target = dt.replace(minute=0, second=0, microsecond=0).strftime("%Y-%m-%dT%H:00")
-        if target in times:
-            idx = times.index(target)
-        else:
-            target_ts = int(dt.timestamp())
-            def hour_ts(t):
-                return int(datetime.fromisoformat(t).replace(tzinfo=timezone.utc).timestamp())
-            idx = min(range(len(times)), key=lambda i: abs(hour_ts(times[i]) - target_ts))
-        temp_c = hourly.get("temperature_2m", [None])[idx]
-        precip_prob = hourly.get("precipitation_probability", [None])[idx]
-        precip = hourly.get("precipitation", [None])[idx]
-        wind_kph = hourly.get("wind_speed_10m", [None])[idx]
-        return {
-            "temp_f": None if temp_c is None else round((temp_c * 9 / 5) + 32, 1),
-            "precip_prob": precip_prob,
-            "precip_mm": precip,
-            "wind_mph": None if wind_kph is None else round(wind_kph / 1.60934, 1),
-        }
-    except Exception:
-        return {}
-
-
-def weather_summary_from_metrics(row):
-    venue = row.get("Venue Type", "Unknown")
-    if venue in {"Indoor", "Roofed"}:
-        return f"{venue} venue"
-    parts = []
-    if pd.notna(row.get("Temp F")):
-        parts.append(f"{row['Temp F']:.0f}°F")
-    if pd.notna(row.get("Wind MPH")):
-        parts.append(f"{row['Wind MPH']:.0f} mph wind")
-    if pd.notna(row.get("Precip Prob")) and row.get("Precip Prob", 0) > 0:
-        parts.append(f"{row['Precip Prob']:.0f}% rain chance")
-    return " • ".join(parts) if parts else "Outdoor conditions unavailable"
-
-
-def apply_weather_context(df):
-    if df.empty:
-        return df
-    rows = []
-    for _, row in df.iterrows():
-        env = team_environment(row)
-        venue_type = str(env.get("venue_type", "outdoor")).title()
-        surface = str(env.get("surface", "grass")).title()
-        lat = env.get("lat")
-        lon = env.get("lon")
-        snapshot = fetch_weather_snapshot(lat, lon, row.get("Start Time")) if venue_type == "Outdoor" and lat is not None and lon is not None else {}
-        temp_f = snapshot.get("temp_f")
-        precip_prob = snapshot.get("precip_prob")
-        precip_mm = snapshot.get("precip_mm")
-        wind_mph = snapshot.get("wind_mph")
-        score = 0.0
-        bucket = row.get("Market Bucket")
-        if venue_type in {"Indoor", "Roofed"}:
-            if bucket in {"Moneyline", "Spread", "Total"}:
-                score += 0.10
-        else:
-            if wind_mph is not None and wind_mph >= 15:
-                if bucket in {"Total", "Player Prop", "DFS Prop", "Team Total"}:
-                    score -= 0.45
-                else:
-                    score += 0.10
-            if precip_prob is not None and precip_prob >= 45:
-                if bucket in {"Total", "Player Prop", "DFS Prop", "Team Total"}:
-                    score -= 0.35
-                else:
-                    score -= 0.10
-            if temp_f is not None and temp_f <= 40 and bucket in {"Total", "Player Prop", "DFS Prop"}:
-                score -= 0.15
-        if surface == "Turf" and bucket in {"Spread", "Moneyline"}:
-            score += 0.10
-        if surface == "Grass" and bucket in {"Total", "Player Prop", "DFS Prop"}:
-            score -= 0.05
-        rows.append({
-            "Venue Type": venue_type,
-            "Surface Type": surface,
-            "Temp F": temp_f,
-            "Wind MPH": wind_mph,
-            "Precip Prob": precip_prob,
-            "Precip MM": precip_mm,
-            "Weather Score": round(score, 2),
-        })
-    weather_df = pd.DataFrame(rows)
-    enriched = pd.concat([df.reset_index(drop=True), weather_df.reset_index(drop=True)], axis=1)
-    enriched["Weather Summary"] = enriched.apply(weather_summary_from_metrics, axis=1)
-    enriched["Weather Flag"] = enriched.apply(
-        lambda row: "Wind/Rain Risk" if ((pd.notna(row.get("Wind MPH")) and row.get("Wind MPH", 0) >= 15) or (pd.notna(row.get("Precip Prob")) and row.get("Precip Prob", 0) >= 45))
-        else ("Indoor / Stable" if row.get("Venue Type") in {"Indoor", "Roofed"} else "Weather Neutral"),
-        axis=1,
-    )
-    return enriched
-
-
-def build_context_reason(row):
-    parts = []
-    if row.get("Headline Matches", 0) > 0:
-        parts.append(f"{int(row['Headline Matches'])} related headline hits")
-    if row.get("Positive News Hits", 0) > 0:
-        parts.append("positive headline tone")
-    if row.get("Negative News Hits", 0) > 0:
-        parts.append("injury/risk headline tone")
-    if row.get("Weather Hits", 0) > 0:
-        parts.append("weather mention in related news")
-    if row.get("Surface Hits", 0) > 0:
-        parts.append("surface mention in related news")
-    if row.get("Streak Hits", 0) > 0:
-        parts.append("recent streak angle detected")
-    if row.get("Move Label") == "Improving":
-        parts.append("line is moving in your favor")
-    if row.get("Move Label") == "Worse":
-        parts.append("line moved against you")
-    if row.get("Venue Type"):
-        parts.append(f"{str(row.get('Venue Type')).lower()} venue")
-    if row.get("Surface Type") and str(row.get("Surface Type")).lower() not in {"hardcourt", "ice"}:
-        parts.append(f"{str(row.get('Surface Type')).lower()} surface")
-    if row.get("Weather Flag") and row.get("Weather Flag") not in {"Weather Neutral", "Indoor / Stable"}:
-        parts.append(str(row.get("Weather Flag")).lower())
-    daypart = row.get("Daypart", "")
-    if daypart and daypart != "Unknown":
-        parts.append(f"{daypart.lower()} game window")
-    return " • ".join(parts)
-
-
-def apply_context_ai(df, news_items, min_bet, max_bet):
-    if df.empty:
-        return df
-
-    contexts = [build_headline_context(row, news_items) for _, row in df.iterrows()]
-    ctx_df = pd.DataFrame(contexts)
-    enriched = pd.concat([df.reset_index(drop=True), ctx_df.reset_index(drop=True)], axis=1)
-    enriched["Daypart"] = enriched["Start Time"].apply(daypart_from_start)
-
-    enriched["Headline Matches"] = enriched["headline_matches"].fillna(0).astype(int)
-    enriched["Positive News Hits"] = enriched["positive_hits"].fillna(0).astype(int)
-    enriched["Negative News Hits"] = enriched["negative_hits"].fillna(0).astype(int)
-    enriched["Weather Hits"] = enriched["weather_hits"].fillna(0).astype(int)
-    enriched["Surface Hits"] = enriched["surface_hits"].fillna(0).astype(int)
-    enriched["Streak Hits"] = enriched["streak_hits"].fillna(0).astype(int)
-    enriched["Time News Hits"] = enriched["time_hits"].fillna(0).astype(int)
-    enriched["Context Tags"] = enriched["tags"].apply(lambda vals: ", ".join(vals[:3]) if vals else "No major context flags")
-
-    move_bonus = enriched["Move Label"].map({"Improving": 0.60, "Flat": 0.00, "Worse": -0.60, "New": 0.10}).fillna(0.0)
-    positive_bonus = (enriched["Positive News Hits"].clip(upper=2) * 0.35)
-    negative_penalty = (enriched["Negative News Hits"].clip(upper=3) * -0.45)
-    weather_penalty = enriched.apply(lambda row: -0.30 if row["Weather Hits"] > 0 and row["Market Bucket"] in {"Total", "Player Prop", "DFS Prop"} else (-0.10 if row["Weather Hits"] > 0 else 0.0), axis=1)
-    surface_bonus = enriched.apply(lambda row: 0.20 if row["Surface Hits"] > 0 and row["Market Bucket"] in {"Spread", "Total"} else 0.0, axis=1)
-    streak_bonus = enriched.apply(lambda row: 0.35 if row["Streak Hits"] > 0 and row["Market Bucket"] in {"Player Prop", "DFS Prop", "Moneyline"} else 0.15 if row["Streak Hits"] > 0 else 0.0, axis=1)
-    books_bonus = enriched["Books Quoting"].apply(lambda x: 0.15 if x >= 3 else 0.0)
-    real_weather = enriched.get("Weather Score", pd.Series([0.0] * len(enriched)))
-
-    enriched["Context Score"] = (move_bonus + positive_bonus + negative_penalty + weather_penalty + surface_bonus + streak_bonus + books_bonus + real_weather).round(2)
-    enriched["AI Score"] = (enriched["Bet Score"] + enriched["Context Score"]).round(2)
-    enriched["AI Tier"] = enriched["AI Score"].apply(lambda x: "Bet of the Day" if x >= 8 else ("Best Value" if x >= 6 else ("Safest Play" if x >= 5 else "Board Play")))
-    enriched["Confidence"] = enriched["AI Score"].apply(confidence_from_score)
-    enriched["Recommended Bet"] = enriched.apply(
-        lambda row: bet_size_from_score(
-            edge=row["Edge %"],
-            score=row["AI Score"],
-            min_bet=min_bet,
-            max_bet=max_bet,
-        ),
-        axis=1,
-    )
-    enriched["Status"] = enriched["Recommended Bet"].apply(lambda x: "Bet" if x > 0 else "No Bet")
-    enriched["AI Reason"] = enriched.apply(build_context_reason, axis=1)
-    enriched["Reason"] = enriched.apply(
-        lambda row: row["Reason"] + (" • " + row["AI Reason"] if row["AI Reason"] else ""),
-        axis=1,
-    )
-    enriched["Rank Score"] = enriched["AI Score"]
-    return enriched
-
-
-def build_decision_center_insight(live_bets):
-    if live_bets is None or live_bets.empty:
-        return "No final bets qualify right now. The board is waiting for a stronger edge or cleaner context setup."
-    top = live_bets.iloc[0]
-    tags = top.get("Context Tags", "No major context flags")
-    return (
-        f"Top board lean is {top['Pick']} at {top['Sportsbook']} because the AI score is {top['AI Score']:.2f}, "
-        f"the market edge is {top['Edge %']:.2f}%, the weather read is {str(top.get('Weather Flag', 'Weather Neutral')).lower()}, and the context lens is seeing {tags.lower()}."
-    )
-
-
-# -----------------------------
-# BASIC HELPERS
-# -----------------------------
 def american_to_implied(odds_value):
     try:
         odds_str = str(odds_value).strip().replace("−", "-")
@@ -713,7 +340,6 @@ def get_same_pick_market_rows(df, row):
     return same.sort_values(["Implied Prob", "Bet Score"], ascending=[True, False]).reset_index(drop=True)
 
 
-
 def build_book_snapshot_html(row, compare_df=None):
     same = get_same_pick_market_rows(compare_df, row)
     if same.empty:
@@ -737,7 +363,6 @@ def build_book_snapshot_html(row, compare_df=None):
     return "<div class='book-quote-grid'>" + "".join(blocks) + "</div>"
 
 
-
 def build_explain_bet_markdown(row, compare_df=None):
     same = get_same_pick_market_rows(compare_df, row)
     notes = []
@@ -746,7 +371,6 @@ def build_explain_bet_markdown(row, compare_df=None):
     notes.append(f"**Model vs market:** model probability {row.get('Model Prob', 0):.2f}% vs edge {row.get('Edge %', 0):.2f}%.")
     notes.append(f"**Score + sizing:** bet score {row.get('Bet Score', 0):.2f}, recommended ${int(row.get('Recommended Bet', 0))}, final allocation ${int(row.get('Final Bet', 0))}.")
     notes.append(f"**Line movement:** previous odds {row.get('Prev Odds', '—')} to current {row.get('Odds', '')}, labeled {row.get('Move Label', 'Flat')} ({row.get('Line Move %', 0):+.2f}%).")
-    notes.append(f"**Conditions:** {row.get('Weather Summary', 'No weather note')} · venue {row.get('Venue Type', 'Unknown')} · surface {row.get('Surface Type', 'Unknown')}.")
     notes.append(f"**Risk controls:** {row.get('Allocation Status', '—')}. {row.get('Pass Reason', '') or 'No extra pass note; the play fits the current controls.'}")
     if not same.empty:
         best = same.iloc[0]
@@ -761,113 +385,105 @@ def build_explain_bet_markdown(row, compare_df=None):
     return "\n\n".join(notes)
 
 
-# -----------------------------
-# LIVE FETCH
-# -----------------------------
-# -----------------------------
-# LIVE FETCH
-# -----------------------------
-def _get_cached_events_fallback(cache_key):
-    if "last_good_events" not in st.session_state:
-        st.session_state["last_good_events"] = {}
-    return st.session_state["last_good_events"].get(cache_key, [])
-
-
-def _set_cached_events_fallback(cache_key, events):
-    if "last_good_events" not in st.session_state:
-        st.session_state["last_good_events"] = {}
-    st.session_state["last_good_events"][cache_key] = events
-
-
-def _fetch_events_for_single_league(api_key, league):
-    url = "https://api.sportsgameodds.com/v2/events/"
-    headers = {"x-api-key": api_key}
-    params = {
-        "leagueID": league,
-        "oddsAvailable": "true",
-        "limit": 35,
-    }
-
-    backoff_seconds = [1, 2, 4]
-
-    for attempt, wait_time in enumerate(backoff_seconds, start=1):
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=25)
-
-            if response.status_code == 429:
-                if attempt < len(backoff_seconds):
-                    time.sleep(wait_time)
-                    continue
-                return [], f"Rate limit reached for {league}. The API returned 429 Too Many Requests."
-
-            if response.status_code in (401, 403):
-                return [], "SportsGameOdds API key is missing, invalid, or does not have access to this endpoint."
-
-            response.raise_for_status()
-            payload = response.json()
-            events = payload.get("data", []) if isinstance(payload, dict) else payload
-            return events, ""
-
-        except requests.exceptions.Timeout:
-            if attempt < len(backoff_seconds):
-                time.sleep(wait_time)
-                continue
-            return [], f"Timed out while loading {league} odds."
-        except requests.exceptions.RequestException as exc:
-            return [], f"API request failed for {league}: {exc}"
-        except Exception as exc:
-            return [], f"Unexpected error while loading {league}: {exc}"
-
-    return [], f"Could not load {league} after multiple attempts."
-
-
-@st.cache_data(ttl=1800, show_spinner="Loading live odds...")
+@st.cache_data(ttl=900, show_spinner="Loading live odds...")
 def fetch_events(leagues):
     api_key = st.secrets.get("SPORTS_GAME_ODDS_API_KEY", "")
     if not api_key:
-        return [], "Missing SPORTS_GAME_ODDS_API_KEY in Streamlit secrets.", False
+        return [], "Missing SPORTS_GAME_ODDS_API_KEY in Streamlit secrets."
 
-    selected_leagues = list(leagues or [])
-    if not selected_leagues:
-        return [], "Please select at least one league.", False
+    url = "https://api.sportsgameodds.com/v2/events/"
+    headers = {"x-api-key": api_key}
+    params = {
+        "leagueID": ",".join(leagues),
+        "oddsAvailable": "true",
+        "limit": 100,
+    }
 
-    cache_key = "|".join(sorted(selected_leagues))
-    all_events = []
-    messages = []
-    had_429 = False
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=25)
+        response.raise_for_status()
+        payload = response.json()
+        events = payload.get("data", []) if isinstance(payload, dict) else payload
+        return events, ""
+    except Exception as exc:
+        return [], f"API error: {exc}"
 
-    for league in selected_leagues:
-        league_events, league_error = _fetch_events_for_single_league(api_key, league)
 
-        if league_error:
-            messages.append(league_error)
-            if "429" in league_error or "Rate limit" in league_error:
-                had_429 = True
-            continue
+def flatten_events_to_rows(events):
+    rows = []
 
-        all_events.extend(league_events)
-        time.sleep(0.35)
+    for event in events:
+        event_id = event.get("eventID", "")
+        league_id = event.get("leagueID", "")
+        sport_id = event.get("sportID", "")
+        status = event.get("status", {}) or {}
+        teams = event.get("teams", {}) or {}
+        players = event.get("players", {}) or {}
+        event_links = (event.get("links", {}) or {}).get("bookmakers", {}) or {}
+        odds_map = event.get("odds", {}) or {}
 
-    if all_events:
-        _set_cached_events_fallback(cache_key, all_events)
-        if messages:
-            return all_events, "Loaded with partial warnings: " + " | ".join(messages), False
-        return all_events, "", False
+        home_name = safe_team_name(teams.get("home", {}), "Home")
+        away_name = safe_team_name(teams.get("away", {}), "Away")
+        event_name = f"{away_name} @ {home_name}"
+        starts_at = status.get("startsAt", "")
 
-    fallback_events = _get_cached_events_fallback(cache_key)
-    if fallback_events:
-        if had_429:
-            return fallback_events, "SportsGameOdds rate limit hit. Showing last successful cached board.", True
-        return fallback_events, "Live API failed. Showing last successful cached board.", True
+        for odd_id, odd in odds_map.items():
+            by_bookmaker = odd.get("byBookmaker", {}) or {}
+            market_name = odd.get("marketName", "") or "Market"
 
-    if had_429:
-        return [], "SportsGameOdds rate limit hit. Wait a few minutes, then click Refresh now.", False
+            for book_id, quote in by_bookmaker.items():
+                if book_id not in TARGET_BOOKS:
+                    continue
+                if not isinstance(quote, dict):
+                    continue
+                if quote.get("available") is False:
+                    continue
 
-    return [], " | ".join(messages) if messages else "No live odds could be loaded.", False
+                odds_value = quote.get("odds")
+                implied_prob = american_to_implied(odds_value)
+                if implied_prob is None:
+                    continue
 
-# -----------------------------
-# SCORING
-# -----------------------------
+                pick_label = build_pick_label(
+                    odd=odd,
+                    quote=quote,
+                    home_name=home_name,
+                    away_name=away_name,
+                    players=players,
+                )
+
+                deep_link = quote.get("deeplink") or event_links.get(book_id, "")
+                sportsbook_name = TARGET_BOOKS[book_id]
+                market_bucket = classify_market(market_name, pick_label, sportsbook_name)
+                row_key = f"{event_id}|{odd_id}|{book_id}"
+
+                rows.append(
+                    {
+                        "Row Key": row_key,
+                        "Event ID": event_id,
+                        "Odd ID": odd_id,
+                        "Sport": league_id or sport_id,
+                        "Event": event_name,
+                        "Home Team": home_name,
+                        "Away Team": away_name,
+                        "Start Time": starts_at,
+                        "Minutes To Start": minutes_to_start(starts_at),
+                        "Market": market_name,
+                        "Market Bucket": market_bucket,
+                        "Pick": pick_label,
+                        "Sportsbook": sportsbook_name,
+                        "Sportsbook ID": book_id,
+                        "Odds": str(odds_value),
+                        "Implied Prob": implied_prob,
+                        "Line": quote.get("spread") or quote.get("overUnder") or "",
+                        "Last Update": quote.get("lastUpdatedAt", ""),
+                        "Link": deep_link,
+                    }
+                )
+
+    return pd.DataFrame(rows)
+
+
 def confidence_from_score(score):
     if score >= 7.0:
         return "Elite"
@@ -994,6 +610,7 @@ def apply_smart_scoring(df, min_bet, max_bet):
         + scored["Book Penalty"]
     ).round(2)
 
+    scored["AI Score"] = scored["Bet Score"]
     scored["Confidence"] = scored["Bet Score"].apply(confidence_from_score)
     scored["Recommended Bet"] = scored.apply(
         lambda row: bet_size_from_score(
@@ -1007,12 +624,12 @@ def apply_smart_scoring(df, min_bet, max_bet):
     scored["Status"] = scored["Recommended Bet"].apply(lambda x: "Bet" if x > 0 else "No Bet")
     scored["Reason"] = scored.apply(build_reason, axis=1)
     scored["Market Rank"] = scored["Market Bucket"].apply(market_sort_value)
+    scored["Rank Score"] = scored["Bet Score"]
+    scored["Context Score"] = 0.0
+    scored["Context Tags"] = "Core model only"
     return scored
 
 
-# -----------------------------
-# LINE MOVEMENT + RISK CONTROLS
-# -----------------------------
 def apply_line_movement(df):
     if df.empty:
         return df
@@ -1182,9 +799,6 @@ def apply_risk_controls(
     return controlled
 
 
-# -----------------------------
-# STYLING
-# -----------------------------
 st.markdown(
     """
     <style>
@@ -1284,19 +898,6 @@ st.markdown(
         margin-top: 6px;
     }
 
-    .pill {
-        display: inline-block;
-        background: #eaf3ff;
-        color: #174272;
-        border: 1px solid #c6dbf4;
-        border-radius: 999px;
-        padding: 4px 10px;
-        font-size: 0.8rem;
-        font-weight: 700;
-        margin-right: 6px;
-        margin-top: 6px;
-    }
-
     div[data-baseweb="select"] > div,
     div[data-baseweb="base-input"] > div {
         color: black !important;
@@ -1325,6 +926,7 @@ st.markdown(
         background: #dfeeff !important;
         color: #163b68 !important;
     }
+
     .book-link-card {
         background: linear-gradient(135deg, #ffffff 0%, #f3f8ff 100%);
         border: 1px solid #cfe1f7;
@@ -1457,82 +1059,6 @@ st.markdown(
         margin-top: 6px;
     }
 
-    .ticker-wrap {
-        display: flex;
-        align-items: center;
-        gap: 14px;
-        background: linear-gradient(135deg, #ffffff 0%, #eef5ff 100%);
-        border: 1px solid #d3e4fa;
-        border-radius: 18px;
-        padding: 12px 16px;
-        box-shadow: 0 8px 18px rgba(22, 59, 104, 0.07);
-        margin: 12px 0 16px 0;
-        overflow: hidden;
-    }
-
-    .ticker-label {
-        flex: 0 0 auto;
-        color: #173b67;
-        font-size: 0.82rem;
-        font-weight: 900;
-        letter-spacing: 0.06em;
-        background: #dcecff;
-        border: 1px solid #bdd7fa;
-        border-radius: 999px;
-        padding: 7px 12px;
-    }
-
-    .ticker-track {
-        position: relative;
-        overflow: hidden;
-        white-space: nowrap;
-        width: 100%;
-    }
-
-    .ticker-move {
-        display: inline-block;
-        white-space: nowrap;
-        color: #153457;
-        font-size: 0.95rem;
-        font-weight: 700;
-        padding-left: 100%;
-        animation: ticker-slide 34s linear infinite;
-    }
-
-    @keyframes ticker-slide {
-        0% { transform: translateX(0); }
-        100% { transform: translateX(-100%); }
-    }
-
-    .decision-card {
-        background: linear-gradient(135deg, #ffffff 0%, #f5f9ff 100%);
-        border: 1px solid #d6e4f5;
-        border-radius: 18px;
-        padding: 18px;
-        box-shadow: 0 8px 20px rgba(22, 59, 104, 0.07);
-        margin-bottom: 16px;
-    }
-
-    .decision-title {
-        color: #163b68;
-        font-size: 1.1rem;
-        font-weight: 800;
-        margin-bottom: 8px;
-    }
-
-    .decision-big {
-        color: #0f2745;
-        font-size: 1.4rem;
-        font-weight: 900;
-        line-height: 1.25;
-    }
-
-    .decision-sub {
-        color: #49627f;
-        font-size: 0.95rem;
-        margin-top: 8px;
-    }
-
     .hero-row-card {
         background: linear-gradient(145deg, #ffffff 0%, #eef5ff 100%);
         border: 1px solid #cfe0f7;
@@ -1563,12 +1089,6 @@ st.markdown(
         color: #486480;
         font-size: 0.94rem;
         margin-top: 8px;
-    }
-
-    .context-list {
-        margin: 0;
-        padding-left: 18px;
-        color: #294866;
     }
 
     .news-card {
@@ -1620,10 +1140,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-
-# -----------------------------
-# SIDEBAR
-# -----------------------------
 st.sidebar.title("⚙️ Dashboard Controls")
 
 bankroll = st.sidebar.number_input("Bankroll", min_value=1.0, value=500.0, step=25.0)
@@ -1658,15 +1174,13 @@ if st.sidebar.button("Refresh now"):
 
 st.markdown('<div class="main-title">🏈 Sports Betting Dashboard</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="sub-title">Lighter look, sharper controls, line movement tracking, and smarter risk allocation built on your stable version.</div>',
+    '<div class="sub-title">Stable core version with live odds, line movement, book comparison, and bankroll controls.</div>',
     unsafe_allow_html=True,
 )
 
 render_quick_links()
 
-# -----------------------------
-# LIVE DASHBOARD
-# -----------------------------
+
 @st.fragment(run_every="15m")
 def render_live_dashboard():
     events, error_message = fetch_events(league_filter)
@@ -1681,12 +1195,9 @@ def render_live_dashboard():
         st.warning("No live odds came back for the leagues selected.")
         return
 
-    news_items = fetch_news_items_for_leagues(league_filter, per_feed=4)
     scored_df = apply_smart_scoring(raw_df, min_bet=min_bet, max_bet=max_bet)
     moved_df = apply_line_movement(scored_df)
-    weather_df = apply_weather_context(moved_df)
-    ai_df = apply_context_ai(weather_df, news_items=news_items, min_bet=min_bet, max_bet=max_bet)
-    filtered_df = ai_df[ai_df["Sportsbook"].isin(book_filter)].copy()
+    filtered_df = moved_df[moved_df["Sportsbook"].isin(book_filter)].copy()
     filtered_df = apply_risk_controls(
         filtered_df,
         min_bet=min_bet,
@@ -1742,7 +1253,7 @@ def render_live_dashboard():
                 **{best_row['Pick']}**  
                 {best_row['Event']} · {best_row['Market']}  
                 Book: **{best_row['Sportsbook']}** · Odds: **{best_row['Odds']}** · Previous: **{best_row['Prev Odds']}**  
-                Edge: **{best_row['Edge %']:.2f}%** · AI Score: **{best_row['AI Score']:.2f}** · Final Bet: **${int(best_row['Final Bet'])}**  
+                Edge: **{best_row['Edge %']:.2f}%** · Score: **{best_row['AI Score']:.2f}** · Final Bet: **${int(best_row['Final Bet'])}**  
                 Line Move: **{best_row['Line Move %']:+.2f}%** · Time To Start: **{format_minutes(best_row['Minutes To Start'])}**  
                 Reason: *{best_row['Pass Reason'] or best_row['Reason']}*  
                 {pills}
@@ -1800,7 +1311,6 @@ def render_live_dashboard():
     ])
 
     with tabs[0]:
-
         st.markdown('<div class="section-title">Premium Top 3 Bets</div>', unsafe_allow_html=True)
         top_df = live_bets.head(3)
         hero_cols = st.columns(3)
@@ -1820,8 +1330,7 @@ def render_live_dashboard():
                                 <div class="hero-main">{row['Pick']}</div>
                                 <div class="hero-meta">{row['Event']} · {row['Market']}</div>
                                 <div class="hero-meta">{row['Sportsbook']} {row['Odds']} · Final Bet ${int(row['Final Bet'])}</div>
-                                <div class="hero-meta">AI Score {row['AI Score']:.2f} · Edge {row['Edge %']:.2f}% · {row['Weather Flag']}</div>
-                                <div class="hero-meta">{row['Weather Summary']}</div>
+                                <div class="hero-meta">Score {row['AI Score']:.2f} · Edge {row['Edge %']:.2f}%</div>
                                 {build_badges_html(row)}
                                 <div class="hero-meta">{row['Pass Reason'] or row['Reason']}</div>
                                 {link_html}
@@ -1844,8 +1353,7 @@ def render_live_dashboard():
                         <div class="decision-title">Featured Bet</div>
                         <div class="decision-big">{first['Pick']}</div>
                         <div class="decision-sub">{first['Event']} · {first['Market']} · {first['Sportsbook']} {first['Odds']}</div>
-                        <div class="decision-sub">AI Score {first['AI Score']:.2f} · Edge {first['Edge %']:.2f}% · Final Bet ${int(first['Final Bet'])}</div>
-                        <div class="decision-sub">Weather: {first['Weather Summary']} · Surface: {first['Surface Type']} · Venue: {first['Venue Type']}</div>
+                        <div class="decision-sub">Score {first['AI Score']:.2f} · Edge {first['Edge %']:.2f}% · Final Bet ${int(first['Final Bet'])}</div>
                         <div class="decision-sub">{first['Pass Reason'] or first['Reason']}</div>
                         {build_badges_html(first)}
                     </div>
@@ -1861,12 +1369,10 @@ def render_live_dashboard():
                             <b>{row['Pick']}</b><br>
                             {row['Event']} · {row['Market']}<br>
                             Book: <b>{row['Sportsbook']}</b> · Odds: <b>{row['Odds']}</b> · Prev: <b>{row['Prev Odds']}</b><br>
-                            Edge: <b>{row['Edge %']:.2f}%</b> · AI Score: <b>{row['AI Score']:.2f}</b> · Confidence: <b>{row['Confidence']}</b><br>
+                            Edge: <b>{row['Edge %']:.2f}%</b> · Score: <b>{row['AI Score']:.2f}</b> · Confidence: <b>{row['Confidence']}</b><br>
                             Final Bet: <b>${int(row['Final Bet'])}</b> · Move: <b>{row['Line Move %']:+.2f}% ({row['Move Label']})</b><br>
-                            Weather: <b>{row['Weather Summary']}</b> · Surface: <b>{row['Surface Type']}</b><br>
                             Decision: <b>{row['Allocation Status']}</b> {row['Watchlist Label']}<br>
                             {build_badges_html(row)}<br>
-                            Context: <b>{row['Context Tags']}</b><br>
                             Reason: <i>{row['Pass Reason'] or row['Reason']}</i>
                             {link_html}
                         </div>
@@ -1875,42 +1381,14 @@ def render_live_dashboard():
                     )
 
         with top_right:
-            st.markdown('<div class="section-title">Decision Center · AI Insight</div>', unsafe_allow_html=True)
-            st.markdown(
-                f"""
-                <div class="decision-card">
-                    <div class="decision-title">Insight of the Day</div>
-                    <div class="decision-sub">{build_decision_center_insight(live_bets)}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            context_watch = live_bets.head(5) if not live_bets.empty else pd.DataFrame()
-            injury_flags = int((context_watch['Negative News Hits'] > 0).sum()) if not context_watch.empty else 0
-            weather_flags = int((context_watch['Weather Flag'] != 'Weather Neutral').sum()) if not context_watch.empty else 0
-            streak_flags = int((context_watch['Streak Hits'] > 0).sum()) if not context_watch.empty else 0
-            st.markdown(
-                f"""
-                <div class="decision-card">
-                    <div class="decision-title">Context Watch</div>
-                    <ul class="context-list">
-                        <li>Headline-linked bets on board: <b>{int((live_bets['Headline Matches'] > 0).sum()) if not live_bets.empty else 0}</b></li>
-                        <li>Injury / risk news flags: <b>{injury_flags}</b></li>
-                        <li>Weather / venue flags: <b>{weather_flags}</b></li>
-                        <li>Streak signals: <b>{streak_flags}</b></li>
-                        <li>Improving lines: <b>{improving_count}</b></li>
-                    </ul>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+            st.markdown('<div class="section-title">Board Snapshot</div>', unsafe_allow_html=True)
             st.markdown(
                 f"""
                 <div class="decision-card">
                     <div class="decision-title">Risk Gauge</div>
                     <div class="decision-sub">Open suggested exposure is <b>${open_risk}</b> against a max total cap of <b>${max_total_exposure:.0f}</b>.</div>
-                    <div class="decision-sub">Average AI score on final bets is <b>{avg_score:.2f}</b> across <b>{active_bets}</b> bets.</div>
-                    <div class="decision-sub">Average books quoting is <b>{avg_books:.2f}</b>. Outdoor weather-sensitive bets on board: <b>{int((live_bets['Venue Type'] == 'Outdoor').sum()) if not live_bets.empty else 0}</b>.</div>
+                    <div class="decision-sub">Average score on final bets is <b>{avg_score:.2f}</b> across <b>{active_bets}</b> bets.</div>
+                    <div class="decision-sub">Average books quoting is <b>{avg_books:.2f}</b>. Improving lines on board: <b>{improving_count}</b>.</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1919,7 +1397,7 @@ def render_live_dashboard():
         c1, c2 = st.columns(2)
         with c1:
             st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown("**AI Score by Sportsbook**")
+            st.markdown("**Score by Sportsbook**")
             if live_bets.empty:
                 st.info("No chart data available.")
             else:
@@ -1949,18 +1427,12 @@ def render_live_dashboard():
 
         with c4:
             st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown("**Context Flags on Final Bets**")
+            st.markdown("**Score vs Edge Snapshot**")
             if live_bets.empty:
                 st.info("No chart data available.")
             else:
-                chart_df = pd.Series({
-                    "Headline Hits": int((live_bets["Headline Matches"] > 0).sum()),
-                    "Injury News": int((live_bets["Negative News Hits"] > 0).sum()),
-                    "Weather News": int((live_bets["Weather Hits"] > 0).sum()),
-                    "Weather/Venue": int((live_bets["Weather Flag"] != "Weather Neutral").sum()),
-                    "Streaks": int((live_bets["Streak Hits"] > 0).sum()),
-                })
-                st.bar_chart(chart_df)
+                chart_df = live_bets[["Pick", "AI Score", "Edge %"]].head(8).set_index("Pick")
+                st.line_chart(chart_df)
             st.markdown('</div>', unsafe_allow_html=True)
 
         c5, c6 = st.columns(2)
@@ -1975,14 +1447,17 @@ def render_live_dashboard():
 
         with c6:
             st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown("**AI Score vs Edge Snapshot**")
+            st.markdown("**Best Price Alerts**")
             if live_bets.empty:
                 st.info("No chart data available.")
             else:
-                chart_df = live_bets[["Pick", "AI Score", "Edge %"]].head(8).set_index("Pick")
-                st.line_chart(chart_df)
+                chart_df = pd.Series({
+                    "Strong Shop Alerts": strong_alerts,
+                    "Improving Lines": improving_count,
+                    "Watchlist Hits": watchlist_hits,
+                })
+                st.bar_chart(chart_df)
             st.markdown('</div>', unsafe_allow_html=True)
-
 
     with tabs[1]:
         st.markdown('<div class="section-title">Sports News</div>', unsafe_allow_html=True)
@@ -2019,7 +1494,6 @@ def render_live_dashboard():
                 <div class="card">
                 • Headlines are pulled from ESPN's official RSS feeds.<br>
                 • This tab links straight to the source article.<br>
-                • The ticker above rotates the freshest loaded headlines.<br>
                 • The feed list follows your selected leagues plus Top Headlines.
                 </div>
                 """,
@@ -2065,12 +1539,6 @@ def render_live_dashboard():
                 "Books Quoting",
                 "Bet Score",
                 "AI Score",
-                "Context Score",
-                "Context Tags",
-                "Weather Flag",
-                "Weather Summary",
-                "Surface Type",
-                "Venue Type",
                 "Confidence",
                 "Recommended Bet",
                 "Final Bet",
@@ -2145,16 +1613,8 @@ def render_live_dashboard():
                             <div class="explain-stat-value">{line_gap:.2f}%</div>
                         </div>
                         <div class="explain-stat">
-                            <div class="explain-stat-label">AI Score</div>
+                            <div class="explain-stat-label">Score</div>
                             <div class="explain-stat-value">{explained_row['AI Score']:.2f}</div>
-                        </div>
-                        <div class="explain-stat">
-                            <div class="explain-stat-label">Context</div>
-                            <div class="explain-stat-value">{explained_row['Context Tags']}</div>
-                        </div>
-                        <div class="explain-stat">
-                            <div class="explain-stat-label">Weather</div>
-                            <div class="explain-stat-value">{explained_row['Weather Flag']}</div>
                         </div>
                     </div>
                 </div>
@@ -2181,7 +1641,7 @@ def render_live_dashboard():
                 <div class="card">
                 <b>{book_name}</b><br>
                 This tab shows live lines from the selected leagues with line movement and risk controls applied.<br>
-                It is no longer just best price — it is best price after timing, correlation, and exposure rules.
+                It is focused on price edge, timing, and exposure rules.
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -2228,12 +1688,6 @@ def render_live_dashboard():
                 "Edge %",
                 "Bet Score",
                 "AI Score",
-                "Context Score",
-                "Context Tags",
-                "Weather Flag",
-                "Weather Summary",
-                "Surface Type",
-                "Venue Type",
                 "Confidence",
                 "Recommended Bet",
                 "Final Bet",
@@ -2350,19 +1804,6 @@ def render_live_dashboard():
             else:
                 st.bar_chart(exposure_by_sport)
             st.markdown('</div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown(
-            """
-            <b>What makes it pop more from here:</b><br>
-            • add sportsbook logo images beside each tab card<br>
-            • add row highlight badges for Elite / Improving / Trimmed<br>
-            • add a compact quick-links ribbon at the top for one-click sportsbook jumps<br>
-            • add watchlist filters for favorite teams or market types
-            """,
-            unsafe_allow_html=True,
-        )
-        st.markdown('</div>', unsafe_allow_html=True)
 
 
 render_live_dashboard()
