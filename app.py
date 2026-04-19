@@ -12,6 +12,7 @@ from email.message import EmailMessage
 from math import prod
 
 import altair as alt
+import json
 import pandas as pd
 import requests
 import streamlit as st
@@ -846,6 +847,186 @@ def ai_chat(prompt, context_text):
         return f"AI error: {e}"
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_live_scoreboard(league_id):
+    mapping = _GRADE_LEAGUE_MAP.get(league_id)
+    if not mapping:
+        return []
+    sport, lg = mapping
+    url = (
+        f"https://site.api.espn.com/apis/site/v2/sports/"
+        f"{sport}/{lg}/scoreboard"
+    )
+    out = []
+    try:
+        r = requests.get(url, timeout=8)
+        if r.status_code != 200:
+            return []
+        data = r.json() or {}
+        for ev in data.get("events", []):
+            comp = (ev.get("competitions") or [{}])[0]
+            status = ((comp.get("status") or {}).get("type") or {})
+            state = status.get("state", "")
+            cps = comp.get("competitors") or []
+            if len(cps) != 2:
+                continue
+            teams = []
+            for c in cps:
+                tname = ((c.get("team") or {}).get("displayName") or "")
+                shortn = ((c.get("team") or {}).get("shortDisplayName") or "")
+                abbr = ((c.get("team") or {}).get("abbreviation") or "")
+                try:
+                    score = int(float(c.get("score") or 0))
+                except Exception:
+                    score = 0
+                teams.append({
+                    "name": tname, "short": shortn, "abbr": abbr,
+                    "score": score, "home": c.get("homeAway") == "home",
+                })
+            out.append({
+                "state": state,
+                "detail": status.get("shortDetail", ""),
+                "teams": teams,
+            })
+    except Exception:
+        return []
+    return out
+
+
+def war_room_banner(open_bets, league_filter):
+    if not open_bets:
+        return ""
+    all_games = []
+    for lg in league_filter:
+        for g in fetch_live_scoreboard(lg):
+            all_games.append(g)
+    if not all_games:
+        return ""
+    matched = []
+    for b in open_bets:
+        d = (b.get("description") or "").lower()
+        if not d:
+            continue
+        for g in all_games:
+            hit = False
+            for t in g["teams"]:
+                names = [
+                    t["name"].lower(), t["short"].lower(),
+                    t["abbr"].lower(),
+                ]
+                names = [n for n in names if n and len(n) > 2]
+                if any(n in d for n in names):
+                    hit = True
+                    break
+            if hit:
+                matched.append((b, g))
+                break
+    if not matched:
+        return ""
+    rows = []
+    for b, g in matched[:6]:
+        t1, t2 = g["teams"][0], g["teams"][1]
+        if g["state"] == "in":
+            live, live_color = "LIVE", RED
+        elif g["state"] == "post":
+            live, live_color = "FINAL", GREEN
+        else:
+            live, live_color = "PRE", MUTED
+        score = (
+            f"<b style='color:#F8FAFC'>{t1['abbr'] or t1['short']} "
+            f"{t1['score']}</b> "
+            f"<span style='color:{MUTED}'>vs</span> "
+            f"<b style='color:#F8FAFC'>{t2['abbr'] or t2['short']} "
+            f"{t2['score']}</b>"
+        )
+        bet_summary = (b.get("description") or "")[:50]
+        rows.append(
+            f"<div class='wr-row'>"
+            f"<span class='wr-tag' style='background:{live_color}'>"
+            f"{live}</span>"
+            f"<span class='wr-score'>{score}</span>"
+            f"<span class='wr-detail'>{g['detail']}</span>"
+            f"<span class='wr-bet'>{bet_summary} "
+            f"(${b['stake']:.0f} → ${b['to_win']:.0f})</span>"
+            f"</div>"
+        )
+    return (
+        "<div class='war-room'>"
+        "<div class='wr-head'>"
+        "<span class='wr-pulse'></span>WAR ROOM - YOUR OPEN BETS LIVE"
+        "</div>"
+        + "".join(rows) + "</div>"
+    )
+
+
+def compute_achievements(bets, equity, bankroll, ath):
+    settled = [b for b in bets if b["status"] in ("won", "lost")]
+    wins = [b for b in settled if b["status"] == "won"]
+    profit = sum(
+        b["to_win"] if b["status"] == "won" else -b["stake"]
+        for b in settled
+    )
+    streak = 0
+    for b in sorted(
+        settled, key=lambda x: x.get("settled_at") or "", reverse=True,
+    ):
+        if b["status"] == "won":
+            streak += 1
+        else:
+            break
+    win_rate = (len(wins) / len(settled)) if settled else 0.0
+    return [
+        ("First Blood",   "1st settled bet",                len(settled) >= 1),
+        ("Money Maker",   "+$100 lifetime profit",          profit >= 100),
+        ("Big Money",     "+$500 lifetime profit",          profit >= 500),
+        ("Whale",         "+$1,000 lifetime profit",        profit >= 1000),
+        ("Hot Hand",      "3 wins in a row",                streak >= 3),
+        ("On Fire",       "5 wins in a row",                streak >= 5),
+        ("Sharp",         "60%+ win rate (20+ bets)",
+         win_rate >= 0.6 and len(settled) >= 20),
+        ("Grinder",       "50 bets logged",                 len(settled) >= 50),
+        ("Centurion",     "100 bets logged",                len(settled) >= 100),
+        ("ATH Club",      "Set a new all-time high",        ath > bankroll),
+        ("Comeback Kid",  "Recovered from -10% drawdown",
+         ath > equity * 1.1 and equity >= bankroll),
+        ("Diversified",   "Bets across 3+ books",
+         len({(b.get("book") or "").lower()
+              for b in settled if b.get("book")}) >= 3),
+    ]
+
+
+def achievements_html(badges):
+    chips = []
+    earned_count = sum(1 for _, _, e in badges if e)
+    for name, desc, earned in badges:
+        if earned:
+            style = (
+                "background:linear-gradient(135deg,#FDE68A 0%,#F59E0B 100%);"
+                "color:#1A1306;border:1px solid #92400E;"
+                "box-shadow:0 0 14px rgba(245,158,11,.45);"
+            )
+            mark = "✓"
+        else:
+            style = (
+                "background:rgba(255,255,255,.03);color:#64748B;"
+                "border:1px dashed rgba(255,255,255,.1);"
+            )
+            mark = "○"
+        chips.append(
+            f"<div class='ach-chip' style='{style}'>"
+            f"<div class='ach-name'><span class='ach-mark'>{mark}</span> "
+            f"{name}</div>"
+            f"<div class='ach-desc'>{desc}</div></div>"
+        )
+    return (
+        "<div class='ach-wrap'>"
+        f"<div class='ach-head'>ACHIEVEMENTS "
+        f"<span class='ach-count'>{earned_count}/{len(badges)}</span></div>"
+        f"<div class='ach-grid'>{''.join(chips)}</div>"
+        "</div>"
+    )
+
+
 def card_style_for_pick(matchup):
     if " @ " in (matchup or ""):
         away, home = matchup.split(" @ ", 1)
@@ -1615,6 +1796,75 @@ table { color: #E2E8F0; }
     color: #CBD5E1;
 }
 .stTabs [aria-selected="true"] { background: __CRIMSON__ !important; color: white !important; }
+
+.war-room {
+    background: linear-gradient(90deg, #1a0a10 0%, __PANEL__ 50%, #1a0a10 100%);
+    border: 1px solid rgba(239,68,68,.35); border-radius: 12px;
+    padding: 12px 16px; margin: 6px 0 16px;
+    box-shadow: 0 0 22px rgba(239,68,68,.18);
+}
+.wr-head {
+    font-size:.72rem; letter-spacing:.18em; color:#FCA5A5;
+    font-weight:800; margin-bottom:8px; display:flex; align-items:center;
+}
+.wr-pulse {
+    width:8px; height:8px; background:__RED__; border-radius:50%;
+    margin-right:8px; animation: wrpulse 1.4s infinite;
+    box-shadow:0 0 10px __RED__;
+}
+@keyframes wrpulse {
+    0%,100% { opacity:1; transform: scale(1); }
+    50%     { opacity:.4; transform: scale(.7); }
+}
+.wr-row {
+    display:flex; align-items:center; gap:14px; padding:6px 0;
+    border-top:1px dashed rgba(255,255,255,.06); font-size:.85rem;
+    color:#CBD5E1; flex-wrap:wrap;
+}
+.wr-row:first-of-type { border-top:none; }
+.wr-tag {
+    color:#fff; font-weight:800; font-size:.66rem; letter-spacing:.1em;
+    padding:2px 8px; border-radius:6px;
+}
+.wr-score { font-family:ui-monospace,monospace; font-size:.95rem; }
+.wr-detail { color:__MUTED__; font-size:.78rem; }
+.wr-bet { color:__MUTED__; font-size:.78rem; margin-left:auto;
+          font-style:italic; max-width:50%; text-align:right; }
+
+.ach-wrap {
+    background: linear-gradient(135deg, #1E293B 0%, __PANEL__ 100%);
+    border: 1px solid rgba(245,158,11,.25); border-radius: 14px;
+    padding: 14px 18px; margin: 10px 0 16px;
+}
+.ach-head {
+    font-size:.72rem; letter-spacing:.18em; color:#FDE68A;
+    font-weight:800; margin-bottom:10px;
+}
+.ach-count {
+    background: rgba(245,158,11,.2); color:#FDE68A;
+    padding:2px 8px; border-radius:8px; font-size:.7rem;
+    margin-left:6px;
+}
+.ach-grid {
+    display:grid; grid-template-columns: repeat(auto-fill,minmax(170px,1fr));
+    gap: 8px;
+}
+.ach-chip {
+    border-radius:10px; padding:8px 12px; font-size:.78rem; font-weight:700;
+    transition: transform .2s;
+}
+.ach-chip:hover { transform: translateY(-2px); }
+.ach-name { font-size:.85rem; }
+.ach-mark { font-weight:900; margin-right:4px; }
+.ach-desc { font-size:.68rem; opacity:.85; font-weight:500;
+            margin-top:2px; }
+
+.followup-pill {
+    display:inline-block; background:rgba(158,27,50,.12);
+    color:#FCA5A5; border:1px solid rgba(158,27,50,.4);
+    padding:4px 10px; margin:4px 6px 0 0; border-radius:14px;
+    font-size:.75rem; font-weight:600;
+}
 </style>
 """
 _theme_name = st.sidebar.selectbox(
@@ -1838,6 +2088,11 @@ st.markdown(links_html, unsafe_allow_html=True)
 )
 
 with tab_picks:
+    _wr_open = [b for b in db_load_bets() if b["status"] == "open"]
+    _wr_html = war_room_banner(_wr_open, leagues_filter)
+    if _wr_html:
+        st.markdown(_wr_html, unsafe_allow_html=True)
+
     st.subheader("Today's Suggested Bets")
 
     spotlight_pool = []
@@ -2489,6 +2744,17 @@ with tab_bank:
         weekly_report_card(bets, bankroll), unsafe_allow_html=True,
     )
 
+    try:
+        _ach_ath = float(db_get_kv("ath", str(bankroll)) or bankroll)
+    except Exception:
+        _ach_ath = bankroll
+    st.markdown(
+        achievements_html(
+            compute_achievements(bets, equity, bankroll, _ach_ath)
+        ),
+        unsafe_allow_html=True,
+    )
+
     with st.expander("Bankroll forecaster (Monte-Carlo, 60 days)"):
         forecast_days = st.slider(
             "Days to project", 14, 120, 60, 7, key="forecast_days",
@@ -3039,7 +3305,8 @@ with tab_ai:
 
     user_input = st.chat_input("Ask anything about today's slate or your bets")
 
-    prompt_to_send = canned_clicked or user_input
+    pending = st.session_state.pop("pending_followup", None)
+    prompt_to_send = pending or canned_clicked or user_input
     if prompt_to_send:
         ctx_lines = []
         ctx_lines.append(f"Bankroll: ${bankroll:,.2f}, equity: ${equity:,.2f}, daily exposure: ${today_exposure:,.2f} of ${daily_cap:,.2f} cap.")
@@ -3095,8 +3362,71 @@ with tab_ai:
         st.session_state["ai_chat"].append(
             {"role": "assistant", "content": reply}
         )
+        st.session_state["last_reply"] = reply
+        st.session_state["last_prompt"] = prompt_to_send
+
+    last_reply = st.session_state.get("last_reply")
+    if last_reply:
+        st.markdown("---")
+        ttcols = st.columns([1, 5])
+        with ttcols[0]:
+            tts_payload = json.dumps(last_reply)
+            st.components.v1.html(
+                f"""
+<button id="edge-tts" style="
+  background:#0F172A;color:#FDE68A;border:1px solid rgba(245,158,11,.4);
+  border-radius:999px;padding:8px 16px;font-weight:700;font-size:.85rem;
+  cursor:pointer;font-family:ui-monospace,monospace;">
+  ▶ Read aloud
+</button>
+<script>
+(function(){{
+  const text = {tts_payload};
+  const btn = document.getElementById('edge-tts');
+  if (!('speechSynthesis' in window)) {{
+    btn.disabled = true; btn.style.opacity = .5;
+    btn.textContent = 'TTS not supported'; return;
+  }}
+  let speaking = false;
+  btn.addEventListener('click', () => {{
+    if (speaking) {{ speechSynthesis.cancel(); speaking = false;
+      btn.textContent = '▶ Read aloud'; return; }}
+    const clean = text.replace(/[#*_`>]/g,'').replace(/\\[(.*?)\\]\\(.*?\\)/g,'$1');
+    const u = new SpeechSynthesisUtterance(clean);
+    u.rate = 1.05; u.pitch = 1.0; u.volume = 1.0;
+    const voices = speechSynthesis.getVoices();
+    const v = voices.find(x => /en-US/i.test(x.lang) && /male|daniel|alex/i.test(x.name)) ||
+              voices.find(x => /en-US/i.test(x.lang)) || voices[0];
+    if (v) u.voice = v;
+    u.onend = () => {{ speaking = false; btn.textContent = '▶ Read aloud'; }};
+    speechSynthesis.speak(u);
+    speaking = true; btn.textContent = '■ Stop';
+  }});
+}})();
+</script>
+                """,
+                height=46,
+            )
+        with ttcols[1]:
+            st.caption("Suggested follow-ups:")
+        followups = [
+            ("Dig deeper", "Dig deeper on your last answer. Add more specific numbers, books, and concrete reasoning."),
+            ("Build me a parlay", "Take your last suggestion and turn it into a 2-3 leg parlay with combined odds, hit probability, and EV. Include stake."),
+            ("What's the hedge?", "What's the optimal hedge on your last suggestion? Give book, line, stake, and locked-in profit/loss range."),
+            ("Stake size?", "Recommend the exact stake size for your last suggestion on a $500 bankroll using fractional Kelly. Explain why."),
+            ("What are the risks?", "List the top 3 risks of your last suggestion - injuries, line moves, weather, refs, anything I should know."),
+            ("Alternative pick", "Give me one alternative to your last suggestion that I'd be smart to consider. Why is it different?"),
+        ]
+        fcols = st.columns(3)
+        for i, (label, prompt) in enumerate(followups):
+            if fcols[i % 3].button(
+                label, key=f"fu_{i}", use_container_width=True,
+            ):
+                st.session_state["pending_followup"] = prompt
+                st.rerun()
 
     if st.session_state["ai_chat"]:
         if st.button("Clear chat", key="clear_ai"):
             st.session_state["ai_chat"] = []
+            st.session_state.pop("last_reply", None)
             st.rerun()
