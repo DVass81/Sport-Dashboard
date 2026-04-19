@@ -1,5 +1,2 @@
-streamlit>=1.37.0
-pandas
-numpy
-requests
-plotly
+streamlit>=1.36
+requests>=2.32
