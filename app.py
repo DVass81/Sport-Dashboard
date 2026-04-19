@@ -2531,11 +2531,39 @@ button[kind="primary"] {{
         unsafe_allow_html=True,
     )
     # Team mascot ribbon under the title
-    _mascot = (
-        "ROLL TIDE - HOUNDSTOOTH SHARP - 18-TIME NATIONAL CHAMPS"
-        if _theme_name == "Alabama Crimson Tide"
-        else "ROCKY TOP - VOL NAVY - GO BIG ORANGE"
-    )
+    if _theme_name == "Alabama Crimson Tide":
+        _mascot_text = "ROLL TIDE - HOUNDSTOOTH SHARP"
+        _mascot_icon = (
+            "<svg viewBox='0 0 80 60' width='34' height='26' "
+            "style='vertical-align:middle;margin:0 10px -6px'>"
+            "<path d='M10 38 Q10 12 40 12 Q66 12 70 32 L70 44 "
+            "Q70 52 60 52 L20 52 Q10 52 10 44 Z' "
+            "fill='#9E1B32' stroke='#000' stroke-width='1.5'/>"
+            "<path d='M22 14 Q40 8 62 16 L62 20 Q40 14 22 18 Z' "
+            "fill='#fff' opacity='.85'/>"
+            "<path d='M8 36 L26 36 M8 42 L24 42' stroke='#bbb' "
+            "stroke-width='2' fill='none'/>"
+            "<text x='48' y='38' font-family='Bebas Neue,sans-serif' "
+            "font-size='18' font-weight='900' fill='#fff' "
+            "text-anchor='middle'>A</text></svg>"
+        )
+    else:
+        _mascot_text = "VOL NAVY - GO BIG ORANGE"
+        _mascot_icon = (
+            "<svg viewBox='0 0 80 60' width='34' height='26' "
+            "style='vertical-align:middle;margin:0 10px -6px'>"
+            "<path d='M10 38 Q10 12 40 12 Q66 12 70 32 L70 44 "
+            "Q70 52 60 52 L20 52 Q10 52 10 44 Z' "
+            "fill='#FF8200' stroke='#000' stroke-width='1.5'/>"
+            "<path d='M22 14 Q40 8 62 16 L62 20 Q40 14 22 18 Z' "
+            "fill='#fff' opacity='.85'/>"
+            "<path d='M8 36 L26 36 M8 42 L24 42' stroke='#bbb' "
+            "stroke-width='2' fill='none'/>"
+            "<text x='48' y='38' font-family='Bebas Neue,sans-serif' "
+            "font-size='18' font-weight='900' fill='#fff' "
+            "text-anchor='middle'>T</text></svg>"
+        )
+    _mascot = f"{_mascot_icon}{_mascot_text}{_mascot_icon}"
     st.markdown(
         f"""
 <div style="
@@ -3152,107 +3180,210 @@ Bankroll tab. Params: <code>addBet</code>, <code>book</code>,
 </div>""",
             unsafe_allow_html=True,
         )
-    # ---- Game-day theme music (#85) ----
+    # ---- Game-day theme music (#85) - theme-aware, works on Bama/Vols ----
     with st.expander("Game-day theme music", expanded=False):
+        if _theme_name == "Alabama Crimson Tide":
+            _mode_label = "Crimson brass-band marching cadence"
+        elif _theme_name == "Tennessee Volunteers":
+            _mode_label = "Volunteer bluegrass / banjo riff"
+        else:
+            _mode_label = "Bloomberg ambient drone"
         st.caption(
-            "Ambient drone synthesized in your browser - no download, no "
-            "hosting, no copyright. Click play; tap stop anytime."
+            f"Now playing: {_mode_label}. Original synth loops generated in "
+            "your browser - no copyright, no downloads. The vibe matches "
+            "whichever team theme you have active."
         )
         from streamlit.components.v1 import html as _components_html
+        _mode_token = (
+            "bama" if _theme_name == "Alabama Crimson Tide"
+            else "vols" if _theme_name == "Tennessee Volunteers"
+            else "drone"
+        )
+        _accent = _theme["accent"]
+        _ar2, _ag2, _ab2 = _hex_to_rgb(_accent)
+        _accent_rgb = f"{_ar2},{_ag2},{_ab2}"
         _components_html(
-            """
+            f"""
 <style>
-  #edge-music-btn {
-    width: 100%; padding: 8px 10px; border-radius: 8px;
+  #edge-music-btn {{
+    width: 100%; padding: 10px 10px; border-radius: 8px;
     background: #0F0F0F; color: #F3F4F6;
-    border: 1px solid rgba(220,38,38,.4);
+    border: 1px solid rgba({_accent_rgb},.5);
     font-family: "Bebas Neue", "Oswald", sans-serif;
     letter-spacing: .14em; font-size: .9rem;
     cursor: pointer; transition: all .2s;
-  }
-  #edge-music-btn.on {
-    background: #DC2626; border-color: #DC2626;
-    box-shadow: 0 0 14px rgba(220,38,38,.45);
-  }
-  #edge-music-vol {
-    width: 100%; margin-top: 8px;
-  }
+  }}
+  #edge-music-btn.on {{
+    background: {_accent}; border-color: {_accent};
+    box-shadow: 0 0 14px rgba({_accent_rgb},.55);
+    color: #fff;
+  }}
+  #edge-music-vol {{ width: 100%; margin-top: 8px; }}
+  #edge-music-mode {{
+    text-align:center; font-family: "Bebas Neue","Oswald",sans-serif;
+    letter-spacing:.18em; font-size:.74rem; color:#9CA3AF;
+    margin-top:6px;
+  }}
 </style>
 <button id="edge-music-btn">PLAY THEME</button>
-<input type="range" id="edge-music-vol"
-       min="0" max="100" value="35" />
+<input type="range" id="edge-music-vol" min="0" max="100" value="40" />
+<div id="edge-music-mode">MODE: {_mode_token.upper()}</div>
 <script>
-(function(){
-  let actx, master, oscA, oscB, oscC, lfo, playing = false;
+(function(){{
+  const MODE = "{_mode_token}";
+  let actx = null, master = null, playing = false;
+  let timer = null, nodes = [];
   const btn = document.getElementById('edge-music-btn');
   const vol = document.getElementById('edge-music-vol');
-  function start(){
-    try {
+
+  function note(freq, start, dur, type, peak) {{
+    const o = actx.createOscillator();
+    const g = actx.createGain();
+    o.type = type || 'triangle';
+    o.frequency.value = freq;
+    g.gain.value = 0;
+    g.gain.setValueAtTime(0, start);
+    g.gain.linearRampToValueAtTime(peak || 0.25, start + 0.015);
+    g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+    o.connect(g); g.connect(master);
+    o.start(start); o.stop(start + dur + 0.05);
+    nodes.push(o); nodes.push(g);
+  }}
+
+  // Pitch helpers (equal-tempered, A4=440)
+  function P(semisFromA4) {{ return 440 * Math.pow(2, semisFromA4/12); }}
+
+  // ---- DRONE: ambient pad (default theme) ----
+  function startDrone() {{
+    const lpf = actx.createBiquadFilter();
+    lpf.type='lowpass'; lpf.frequency.value=700; lpf.Q.value=.8;
+    const o1 = actx.createOscillator(); o1.type='sine';   o1.frequency.value=110;
+    const o2 = actx.createOscillator(); o2.type='triangle';o2.frequency.value=164.81;
+    const o3 = actx.createOscillator(); o3.type='sine';   o3.frequency.value=220;
+    const g1 = actx.createGain(); g1.gain.value=.55;
+    const g2 = actx.createGain(); g2.gain.value=.35;
+    const g3 = actx.createGain(); g3.gain.value=.22;
+    const lfo = actx.createOscillator(); lfo.frequency.value=0.07;
+    const lfoG = actx.createGain(); lfoG.gain.value=140;
+    lfo.connect(lfoG); lfoG.connect(lpf.frequency);
+    o1.connect(g1); o2.connect(g2); o3.connect(g3);
+    g1.connect(lpf); g2.connect(lpf); g3.connect(lpf);
+    lpf.connect(master);
+    o1.start(); o2.start(); o3.start(); lfo.start();
+    nodes.push(o1,o2,o3,lfo);
+  }}
+
+  // ---- BAMA: brass-band marching cadence (original) ----
+  // Snare-style stab + tuba root + brass interval, on the 4-count
+  function scheduleBama(t0) {{
+    const bpm = 132; const beat = 60/bpm;
+    const tuba = [-19, -19, -17, -19];     // E2 E2 F#2 E2 (root walk)
+    const brass = [ 0,  4,  7,  4];        // A4 C#5 E5 C#5
+    for (let i=0;i<4;i++) {{
+      const t = t0 + i*beat;
+      // tuba thump
+      note(P(tuba[i]), t, 0.42, 'sine', 0.32);
+      // snare-ish click (square burst high)
+      note(P(24), t, 0.05, 'square', 0.14);
+      note(P(26), t, 0.04, 'square', 0.10);
+      // brass stab
+      note(P(brass[i]),     t+0.04, 0.36, 'sawtooth', 0.18);
+      note(P(brass[i]+12),  t+0.04, 0.32, 'triangle', 0.10);
+    }}
+    return 4*beat;
+  }}
+
+  // ---- VOLS: bluegrass / banjo riff (original) ----
+  // Fast plucky 16ths over a I-IV-I-V country shape
+  function scheduleVols(t0) {{
+    const bpm = 168; const sixteenth = (60/bpm)/4;
+    // Root pattern across 4 beats (G major: G B D D)
+    const pattern = [
+      // beat 1: G B D B  (G major arp)
+      -2, 2, 5, 2,
+      // beat 2: G B D B
+      -2, 2, 5, 2,
+      // beat 3: C E G E  (IV)
+      3, 7, 10, 7,
+      // beat 4: D F# A F# (V)
+      5, 9, 12, 9,
+    ];
+    for (let i=0;i<pattern.length;i++) {{
+      const t = t0 + i*sixteenth;
+      // plucky banjo-ish: square through quick decay
+      note(P(pattern[i]+12),  t,        0.13, 'square',   0.16);
+      note(P(pattern[i]+24),  t+0.005,  0.10, 'triangle', 0.08);
+    }}
+    // bass walk underneath
+    const bass = [-14, -14, -9, -7]; // G2 G2 C3 D3
+    for (let i=0;i<4;i++) {{
+      const t = t0 + i*(60/bpm);
+      note(P(bass[i]), t, 0.5, 'sine', 0.30);
+    }}
+    return 4*(60/bpm);
+  }}
+
+  function loop() {{
+    const t0 = actx.currentTime + 0.05;
+    let dur = 1.0;
+    if (MODE === 'bama') dur = scheduleBama(t0);
+    else if (MODE === 'vols') dur = scheduleVols(t0);
+    timer = setTimeout(loop, Math.max(50, (dur*1000) - 30));
+  }}
+
+  function start() {{
+    try {{
       const AC = window.AudioContext || window.webkitAudioContext;
       actx = new AC();
       master = actx.createGain();
-      master.gain.value = 0.0;
-      const lpf = actx.createBiquadFilter();
-      lpf.type = 'lowpass'; lpf.frequency.value = 700; lpf.Q.value = .8;
-      const reverb = actx.createDelay(); reverb.delayTime.value = 0.32;
-      const fb = actx.createGain(); fb.gain.value = 0.42;
-      reverb.connect(fb); fb.connect(reverb);
-      oscA = actx.createOscillator(); oscA.type='sine';
-      oscA.frequency.value = 110;
-      oscB = actx.createOscillator(); oscB.type='triangle';
-      oscB.frequency.value = 164.81;
-      oscC = actx.createOscillator(); oscC.type='sine';
-      oscC.frequency.value = 220;
-      const gA = actx.createGain(); gA.gain.value = .55;
-      const gB = actx.createGain(); gB.gain.value = .35;
-      const gC = actx.createGain(); gC.gain.value = .22;
-      lfo = actx.createOscillator(); lfo.frequency.value = 0.07;
-      const lfoG = actx.createGain(); lfoG.gain.value = 140;
-      lfo.connect(lfoG); lfoG.connect(lpf.frequency);
-      oscA.connect(gA); oscB.connect(gB); oscC.connect(gC);
-      gA.connect(lpf); gB.connect(lpf); gC.connect(lpf);
-      lpf.connect(reverb); reverb.connect(master);
-      lpf.connect(master);
+      master.gain.value = 0;
       master.connect(actx.destination);
-      oscA.start(); oscB.start(); oscC.start(); lfo.start();
-      const target = (parseInt(vol.value)||35) / 100 * 0.18;
-      master.gain.linearRampToValueAtTime(target, actx.currentTime + 2.5);
+      const target = (parseInt(vol.value)||40)/100 * 0.20;
+      master.gain.linearRampToValueAtTime(target, actx.currentTime + 0.6);
+      if (MODE === 'drone') {{
+        startDrone();
+      }} else {{
+        loop();
+      }}
       playing = true;
-    } catch(e){ console.error(e); }
-  }
-  function stop(){
-    try {
-      if (!actx) return;
-      master.gain.linearRampToValueAtTime(0, actx.currentTime + 1.2);
-      const a=actx;
-      setTimeout(function(){
-        try { oscA.stop(); oscB.stop(); oscC.stop(); lfo.stop(); a.close(); } catch(e){}
-        actx = null;
-      }, 1400);
+    }} catch(e) {{ console.error(e); }}
+  }}
+  function stop() {{
+    if (!actx) return;
+    try {{
+      if (timer) {{ clearTimeout(timer); timer = null; }}
+      master.gain.linearRampToValueAtTime(0, actx.currentTime + 0.5);
+      const a = actx;
+      setTimeout(function() {{
+        try {{ nodes.forEach(n => {{ try {{ n.stop && n.stop(); }} catch(e){{}} }}); }} catch(e){{}}
+        try {{ a.close(); }} catch(e){{}}
+        nodes = []; actx = null; master = null;
+      }}, 700);
       playing = false;
-    } catch(e){}
-  }
-  btn.addEventListener('click', function(){
-    if (playing) {
+    }} catch(e) {{}}
+  }}
+
+  btn.addEventListener('click', function() {{
+    if (playing) {{
       stop();
       btn.textContent = 'PLAY THEME';
       btn.classList.remove('on');
-    } else {
+    }} else {{
       start();
       btn.textContent = 'STOP THEME';
       btn.classList.add('on');
-    }
-  });
-  vol.addEventListener('input', function(){
-    if (master && actx) {
-      const target = (parseInt(vol.value)||0) / 100 * 0.18;
-      master.gain.linearRampToValueAtTime(target, actx.currentTime + 0.2);
-    }
-  });
-})();
+    }}
+  }});
+  vol.addEventListener('input', function() {{
+    if (master && actx) {{
+      const target = (parseInt(vol.value)||0)/100 * 0.20;
+      master.gain.linearRampToValueAtTime(target, actx.currentTime + 0.15);
+    }}
+  }});
+}})();
 </script>
             """,
-            height=110,
+            height=140,
         )
     st.markdown("---")
     st.markdown("### Bankroll")
@@ -3376,17 +3507,55 @@ st.markdown(
 )
 st.markdown("<div class='edge-theme-row'></div>", unsafe_allow_html=True)
 _tcol1, _tcol2, _tcol3 = st.columns(3)
+def _helmet_svg(body, stripe, letter, letter_color):
+    return (
+        "<svg viewBox='0 0 80 60' width='56' height='42' "
+        "style='display:block;margin:0 auto 4px'>"
+        # Helmet shell
+        f"<path d='M10 38 Q10 12 40 12 Q66 12 70 32 L70 44 "
+        f"Q70 52 60 52 L20 52 Q10 52 10 44 Z' "
+        f"fill='{body}' stroke='#000' stroke-width='1.5'/>"
+        # Center stripe
+        f"<path d='M22 14 Q40 8 62 16 L62 20 Q40 14 22 18 Z' "
+        f"fill='{stripe}' opacity='.85'/>"
+        # Facemask
+        "<path d='M8 36 L26 36 M8 42 L24 42 M8 48 L24 48' "
+        "stroke='#bbb' stroke-width='2' fill='none'/>"
+        "<path d='M26 32 L26 52' stroke='#bbb' stroke-width='2'/>"
+        # Earhole
+        "<circle cx='34' cy='38' r='3' fill='#000' opacity='.55'/>"
+        # Letter logo
+        f"<text x='48' y='38' font-family='Bebas Neue,Oswald,sans-serif' "
+        f"font-size='18' font-weight='900' fill='{letter_color}' "
+        f"text-anchor='middle' style='letter-spacing:.04em'>{letter}</text>"
+        "</svg>"
+    )
+
+_helmet_default = (
+    "<svg viewBox='0 0 80 60' width='56' height='42' "
+    "style='display:block;margin:0 auto 4px'>"
+    "<rect x='14' y='18' width='52' height='28' rx='4' "
+    "fill='#0F0F0F' stroke='#9E1B32' stroke-width='2'/>"
+    "<text x='40' y='38' font-family='Bebas Neue,Oswald,sans-serif' "
+    "font-size='16' font-weight='900' fill='#9E1B32' "
+    "text-anchor='middle'>EDGE</text>"
+    "</svg>"
+)
+_helmet_bama = _helmet_svg("#9E1B32", "#FFFFFF", "A", "#FFFFFF")
+_helmet_vols = _helmet_svg("#FF8200", "#FFFFFF", "T", "#FFFFFF")
+
 _btn_specs = [
-    (_tcol1, "Bloomberg",            "DEFAULT (RED/BLACK)",     "edge-theme-default"),
-    (_tcol2, "Alabama Crimson Tide", "ALABAMA - ROLL TIDE",     "edge-theme-bama"),
-    (_tcol3, "Tennessee Volunteers", "TENNESSEE - GO BIG ORANGE", "edge-theme-vols"),
+    (_tcol1, "Bloomberg",            "DEFAULT",        "edge-theme-default", _helmet_default),
+    (_tcol2, "Alabama Crimson Tide", "ROLL TIDE",      "edge-theme-bama",    _helmet_bama),
+    (_tcol3, "Tennessee Volunteers", "GO BIG ORANGE",  "edge-theme-vols",    _helmet_vols),
 ]
-for _col, _theme_id, _label, _cls in _btn_specs:
+for _col, _theme_id, _label, _cls, _helmet in _btn_specs:
     with _col:
         _active = (_theme_name == _theme_id)
         st.markdown(
             f"<div class='{_cls} "
-            f"{'edge-theme-active' if _active else ''}'>",
+            f"{'edge-theme-active' if _active else ''}'>"
+            f"{_helmet}",
             unsafe_allow_html=True,
         )
         if st.button(
