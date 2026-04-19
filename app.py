@@ -415,6 +415,241 @@ def prop_trend_chip(key):
     return f"<span class='trend-chip trend-flat'>flat / {n} reads</span>"
 
 
+def player_avatar(player_name, team_hint=""):
+    name = (player_name or "?").strip()
+    parts = [p for p in name.split() if p]
+    if not parts:
+        initials = "?"
+    elif len(parts) == 1:
+        initials = parts[0][:2].upper()
+    else:
+        initials = (parts[0][0] + parts[-1][0]).upper()
+    color = team_color(team_hint or name)
+    return (
+        f"<span class='player-av' style='background:linear-gradient(135deg,"
+        f"{color} 0%, #0B1220 140%);'>{initials}</span>"
+    )
+
+
+def bankroll_thermometer(equity, start_bankroll, goal):
+    goal = max(goal, start_bankroll + 1)
+    pct = max(0.0, min(1.0, (equity - start_bankroll) / (goal - start_bankroll)))
+    pct_label = f"{pct * 100:.0f}%"
+    fill_color = GREEN if equity >= start_bankroll else RED
+    return (
+        "<div class='thermo-wrap'>"
+        f"<div class='thermo-row'><span class='thermo-lbl'>Goal progress</span>"
+        f"<span class='thermo-pct'>{pct_label}</span></div>"
+        "<div class='thermo-track'>"
+        f"<div class='thermo-fill' style='width:{pct * 100:.1f}%; "
+        f"background:linear-gradient(90deg,{fill_color},#FDE68A);'></div>"
+        "</div>"
+        f"<div class='thermo-row'><span class='thermo-end'>"
+        f"${start_bankroll:,.0f}</span>"
+        f"<span class='thermo-now'>${equity:,.2f}</span>"
+        f"<span class='thermo-end'>${goal:,.0f}</span></div>"
+        "</div>"
+    )
+
+
+_ESPN_LEAGUE_MAP = {
+    "NBA": ("basketball", "nba"),
+    "NFL": ("football", "nfl"),
+    "MLB": ("baseball", "mlb"),
+    "NHL": ("hockey", "nhl"),
+    "NCAAF": ("football", "college-football"),
+    "NCAAB": ("basketball", "mens-college-basketball"),
+}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_injuries(league_id):
+    mapping = _ESPN_LEAGUE_MAP.get(league_id)
+    if not mapping:
+        return {}
+    sport, lg = mapping
+    url = (
+        f"https://site.web.api.espn.com/apis/site/v2/sports/"
+        f"{sport}/{lg}/injuries"
+    )
+    out = {}
+    try:
+        resp = requests.get(url, timeout=8)
+        if resp.status_code != 200:
+            return {}
+        data = resp.json() or {}
+        for team_block in data.get("injuries", []):
+            tname = (team_block.get("team") or {}).get("displayName", "")
+            if not tname:
+                continue
+            items = []
+            for inj in team_block.get("injuries", []):
+                ath = inj.get("athlete") or {}
+                pname = ath.get("displayName", "?")
+                pos = (ath.get("position") or {}).get("abbreviation", "")
+                status = inj.get("status", "?")
+                detail = (inj.get("type") or {}).get(
+                    "description"
+                ) or inj.get("shortComment") or ""
+                items.append({
+                    "player": pname, "pos": pos,
+                    "status": status, "detail": detail[:90],
+                })
+            if items:
+                out[tname.lower()] = items
+    except Exception:
+        return {}
+    return out
+
+
+def _injury_status_color(status):
+    s = (status or "").lower()
+    if "out" in s or "ir" in s or "suspend" in s:
+        return RED
+    if "doubt" in s:
+        return "#F59E0B"
+    if "question" in s or "day" in s:
+        return "#EAB308"
+    return MUTED
+
+
+def render_injuries_for_game(league_id, away, home):
+    inj = fetch_injuries(league_id)
+    if not inj:
+        return ""
+    rows = []
+    for team in (away, home):
+        key = (team or "").lower()
+        match_key = next(
+            (k for k in inj if key and (key in k or k in key)), None,
+        )
+        if not match_key:
+            continue
+        for item in inj[match_key][:6]:
+            color = _injury_status_color(item["status"])
+            rows.append(
+                f"<div class='inj-row'>"
+                f"<span class='inj-team'>{team}</span>"
+                f"<span class='inj-player'>{item['player']}</span>"
+                f"<span class='muted'>{item['pos']}</span>"
+                f"<span class='inj-status' style='background:{color}'>"
+                f"{item['status']}</span>"
+                f"<span class='muted inj-detail'>{item['detail']}</span>"
+                f"</div>"
+            )
+    if not rows:
+        return ""
+    return (
+        "<div class='inj-wrap'>"
+        "<div class='inj-head'>INJURY REPORT</div>"
+        + "".join(rows) +
+        "</div>"
+    )
+
+
+def weekly_report_card(bets, start_bankroll):
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    week = []
+    for b in bets:
+        if b["status"] == "open":
+            continue
+        try:
+            ts = datetime.fromisoformat(
+                (b.get("created_at") or "").replace("Z", "+00:00")
+            )
+        except Exception:
+            continue
+        if ts >= cutoff:
+            week.append(b)
+    if not week:
+        return (
+            "<div class='report-card'><div class='report-head'>"
+            "WEEKLY REPORT CARD</div>"
+            "<div class='muted' style='padding:14px;'>"
+            "No settled bets in the last 7 days.</div></div>"
+        )
+    wins = sum(1 for b in week if b["status"] == "won")
+    losses = sum(1 for b in week if b["status"] == "lost")
+    pushes = sum(1 for b in week if b["status"] == "push")
+    total = wins + losses
+    hit = (wins / total * 100) if total else 0.0
+    pnl = sum(
+        b["to_win"] if b["status"] == "won"
+        else (-b["stake"] if b["status"] == "lost" else 0.0)
+        for b in week
+    )
+    staked = sum(b["stake"] for b in week)
+    roi = (pnl / staked * 100) if staked else 0.0
+    by_day = {}
+    for b in week:
+        d = b.get("date") or b.get("created_at", "")[:10]
+        by_day[d] = by_day.get(d, 0.0) + (
+            b["to_win"] if b["status"] == "won"
+            else (-b["stake"] if b["status"] == "lost" else 0.0)
+        )
+    best_day = max(by_day.items(), key=lambda x: x[1]) if by_day else (None, 0)
+    worst_day = min(by_day.items(), key=lambda x: x[1]) if by_day else (None, 0)
+    by_lg = {}
+    for b in week:
+        lg = b.get("league") or "?"
+        d = by_lg.setdefault(lg, {"w": 0, "l": 0, "p": 0.0})
+        if b["status"] == "won":
+            d["w"] += 1
+            d["p"] += b["to_win"]
+        elif b["status"] == "lost":
+            d["l"] += 1
+            d["p"] -= b["stake"]
+    lg_rows = "".join(
+        f"<tr><td>{lg}</td><td>{d['w']}-{d['l']}</td>"
+        f"<td style='color:{GREEN if d['p'] >= 0 else RED}'>"
+        f"${d['p']:+.2f}</td></tr>"
+        for lg, d in sorted(by_lg.items(), key=lambda x: -x[1]["p"])
+    )
+    pnl_color = GREEN if pnl >= 0 else RED
+    grade = (
+        "A" if roi >= 10 else "B" if roi >= 3 else "C" if roi >= -3
+        else "D" if roi >= -10 else "F"
+    )
+    grade_color = {
+        "A": GREEN, "B": "#84CC16", "C": "#EAB308",
+        "D": "#F59E0B", "F": RED,
+    }[grade]
+    best_html = (
+        f"<div><span class='muted'>Best day</span><br>"
+        f"<b>{best_day[0] or '-'}</b> "
+        f"<span style='color:{GREEN}'>${best_day[1]:+.2f}</span></div>"
+    )
+    worst_html = (
+        f"<div><span class='muted'>Worst day</span><br>"
+        f"<b>{worst_day[0] or '-'}</b> "
+        f"<span style='color:{RED}'>${worst_day[1]:+.2f}</span></div>"
+    )
+    return (
+        "<div class='report-card'>"
+        "<div class='report-head'>WEEKLY REPORT CARD <span class='muted'"
+        " style='font-weight:400;font-size:.7rem;'>last 7 days</span></div>"
+        "<div class='report-grid'>"
+        f"<div class='report-grade' style='color:{grade_color};"
+        f"border-color:{grade_color};'>{grade}</div>"
+        f"<div><span class='muted'>P&amp;L</span><br>"
+        f"<b style='color:{pnl_color}; font-size:1.3rem;'>"
+        f"${pnl:+,.2f}</b></div>"
+        f"<div><span class='muted'>ROI</span><br>"
+        f"<b style='font-size:1.2rem; color:{pnl_color};'>{roi:+.1f}%</b></div>"
+        f"<div><span class='muted'>Record</span><br>"
+        f"<b>{wins}-{losses}{('-' + str(pushes)) if pushes else ''}</b><br>"
+        f"<span class='muted'>{hit:.0f}% hit</span></div>"
+        f"{best_html}{worst_html}"
+        "</div>"
+        + (
+            "<table class='report-tbl'><tr><th>League</th><th>Record</th>"
+            "<th>P&amp;L</th></tr>" + lg_rows + "</table>"
+            if lg_rows else ""
+        ) +
+        "</div>"
+    )
+
+
 def american_to_decimal(american):
     a = float(american)
     return 1.0 + (a / 100.0 if a > 0 else 100.0 / abs(a))
@@ -876,7 +1111,30 @@ section[data-testid="stSidebar"] { background: __PANEL__; }
 }
 .trend-up   { background:rgba(34,197,94,.18); color:__GREEN__; border:1px solid rgba(34,197,94,.4); }
 .trend-down { background:rgba(239,68,68,.18); color:__RED__; border:1px solid rgba(239,68,68,.4); }
-.trend-flat { background:rgba(148,163,184,.18); color:__MUTED__; border:1px solid rgba(148,163,184,.3); }
+.trend-flat { background:rgba(148,163,184,.15); color:__MUTED__; border:1px solid rgba(148,163,184,.3); padding:1px 8px; border-radius:10px; font-size:.7rem; margin-left:8px; font-weight:600; }
+.player-av { display:inline-flex; align-items:center; justify-content:center; width:26px; height:26px; border-radius:50%; font-size:.7rem; font-weight:800; color:#FFF; margin-right:8px; vertical-align:middle; box-shadow:0 1px 4px rgba(0,0,0,.4); border:1px solid rgba(255,255,255,.18); }
+.thermo-wrap { background:linear-gradient(135deg,#0F172A 0%, __PANEL__ 100%); border:1px solid rgba(255,255,255,.06); border-radius:12px; padding:14px 16px; margin:8px 0 14px; }
+.thermo-row { display:flex; justify-content:space-between; align-items:center; font-size:.78rem; color:#94A3B8; margin:2px 0; }
+.thermo-lbl { text-transform:uppercase; letter-spacing:.08em; font-weight:700; color:#CBD5E1; }
+.thermo-pct { color:__GREEN__; font-weight:800; font-size:.95rem; }
+.thermo-track { background:rgba(255,255,255,.06); border-radius:8px; height:14px; overflow:hidden; margin:6px 0 8px; box-shadow:inset 0 1px 3px rgba(0,0,0,.4); }
+.thermo-fill { height:100%; border-radius:8px; transition:width 1.2s cubic-bezier(.4,0,.2,1); box-shadow:0 0 12px rgba(34,197,94,.5); }
+.thermo-now { color:#FDE68A; font-weight:800; font-size:.95rem; }
+.thermo-end { color:#94A3B8; font-weight:600; }
+.inj-wrap { background:rgba(239,68,68,.06); border-left:3px solid __RED__; border-radius:6px; padding:10px 14px; margin:8px 0; }
+.inj-head { font-size:.7rem; letter-spacing:.12em; color:__RED__; font-weight:800; margin-bottom:6px; }
+.inj-row { display:flex; align-items:center; gap:10px; font-size:.85rem; padding:3px 0; flex-wrap:wrap; }
+.inj-team { font-weight:700; color:#CBD5E1; min-width:90px; font-size:.75rem; text-transform:uppercase; letter-spacing:.04em; }
+.inj-player { color:#F8FAFC; font-weight:600; }
+.inj-status { color:#FFF; font-size:.65rem; padding:1px 7px; border-radius:8px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
+.inj-detail { font-size:.78rem; flex:1; min-width:200px; }
+.report-card { background:linear-gradient(135deg, #1E293B 0%, __PANEL__ 100%); border:1px solid rgba(245,158,11,.25); border-radius:14px; padding:16px 20px; margin-bottom:18px; box-shadow:0 4px 18px rgba(0,0,0,.3); }
+.report-head { font-size:.75rem; letter-spacing:.14em; color:#F59E0B; font-weight:800; margin-bottom:12px; }
+.report-grid { display:grid; grid-template-columns:auto repeat(5,1fr); gap:18px; align-items:center; font-size:.85rem; }
+.report-grade { font-size:2.5rem; font-weight:900; width:64px; height:64px; border:3px solid; border-radius:12px; display:flex; align-items:center; justify-content:center; line-height:1; }
+.report-tbl { width:100%; margin-top:14px; font-size:.85rem; border-collapse:collapse; }
+.report-tbl th { text-align:left; color:#94A3B8; font-weight:600; font-size:.72rem; text-transform:uppercase; letter-spacing:.06em; padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.08); }
+.report-tbl td { padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.04); }
 .book-bar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom: 14px; }
 .book-link {
     display:inline-block; padding: 10px 16px; border-radius: 10px;
@@ -952,6 +1210,11 @@ with st.sidebar:
         "Max bet ($)", min_value=min_bet, value=max(10.0, min_bet), step=1.0,
     )
     daily_cap_pct = st.slider("Daily exposure cap (% of bankroll)", 5, 100, 20)
+    bankroll_goal = st.number_input(
+        "Bankroll goal ($)", min_value=float(bankroll) + 1.0,
+        value=max(1000.0, bankroll * 2.0), step=50.0,
+        help="Used by the Goal Progress thermometer on the Bankroll tab.",
+    )
 
     st.markdown("---")
     st.markdown("### Sizing model")
@@ -1406,7 +1669,9 @@ with tab_props:
             card = (
                 "<div class='pick-card'><div class='pick-row'>"
                 "<div>"
-                f"<div class='pick-title'>{r['player']} - "
+                f"<div class='pick-title'>"
+                f"{player_avatar(r['player'], r.get('matchup', ''))}"
+                f"{r['player']} - "
                 f"<span class='muted'>{r['stat']} {r['side']} {r['line']:g}</span>"
                 f"{trend_html}</div>"
                 f"<div class='pick-sub' style='margin-top:4px;'>"
@@ -1638,6 +1903,9 @@ with tab_board:
                 f"<span class='muted' style='font-size:.8rem'>{ev.start}</span>"
             )
             st.markdown(title, unsafe_allow_html=True)
+            inj_html = render_injuries_for_game(league_id, ev.away, ev.home)
+            if inj_html:
+                st.markdown(inj_html, unsafe_allow_html=True)
             for m in ev.markets:
                 st.caption(m.type)
                 rows_t = []
@@ -1685,6 +1953,14 @@ with tab_bank:
     )
     equity = bankroll + pnl
     pnl_color = GREEN if pnl >= 0 else RED
+
+    st.markdown(
+        bankroll_thermometer(equity, bankroll, bankroll_goal),
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        weekly_report_card(bets, bankroll), unsafe_allow_html=True,
+    )
 
     fx = st.session_state.pop("fx", None)
     if fx == "win":
