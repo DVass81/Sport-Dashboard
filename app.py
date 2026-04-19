@@ -1,4 +1,3 @@
-import math
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -41,12 +40,7 @@ def safe_team_name(team_dict, fallback):
     if not isinstance(team_dict, dict):
         return fallback
     names = team_dict.get("names", {})
-    return (
-        names.get("medium")
-        or names.get("long")
-        or names.get("short")
-        or fallback
-    )
+    return names.get("medium") or names.get("long") or names.get("short") or fallback
 
 
 def safe_player_name(players, stat_entity_id):
@@ -82,7 +76,6 @@ def classify_market(market_name, pick, sportsbook):
 
     if sportsbook == "PrizePicks":
         return "DFS Prop"
-
     if "moneyline" in text or text.strip() in {"ml", "winner"}:
         return "Moneyline"
     if "spread" in text or "run line" in text or "puck line" in text or "handicap" in text:
@@ -149,6 +142,21 @@ def make_link_markdown(url):
     return f"[Open]({url})"
 
 
+def format_minutes(value):
+    if value is None or pd.isna(value):
+        return "—"
+    if value < 60:
+        return f"{int(value)} min"
+    hours = value / 60
+    return f"{hours:.1f} hrs"
+
+
+def strong_shop_alerts(df):
+    if df.empty:
+        return 0
+    return int(((df["Books Quoting"] >= 3) & (df["Best Line Gap %"] >= 4)).sum())
+
+
 # -----------------------------
 # LIVE ODDS FETCH
 # -----------------------------
@@ -211,7 +219,6 @@ def flatten_events_to_rows(events):
                 if implied_prob is None:
                     continue
 
-                    # NOTE: This indentation is fixed below in actual use
                 pick_label = build_pick_label(
                     odd=odd,
                     quote=quote,
@@ -297,7 +304,6 @@ def book_penalty(book_name):
 def bet_size_from_score(edge, score, min_bet, max_bet):
     if edge < 1.0 or score < 3.0:
         return 0
-
     if score < 4.0:
         return int(min_bet)
     if score < 5.0:
@@ -360,8 +366,6 @@ def apply_smart_scoring(df, min_bet, max_bet):
     scored = df.merge(market_stats, on=["Event ID", "Odd ID"], how="left")
     scored["Prob StdDev"] = scored["Prob StdDev"].fillna(0.0)
     scored["Model Prob"] = scored["Consensus Prob"].round(2)
-
-    # Lower implied probability is better for the bettor.
     scored["Edge %"] = (scored["Consensus Prob"] - scored["Implied Prob"]).round(2)
     scored["Best Line Gap %"] = (scored["Worst Price Prob"] - scored["Implied Prob"]).round(2)
     scored["Is Best Price"] = scored["Implied Prob"] <= (scored["Best Price Prob"] + 0.0001)
@@ -403,75 +407,99 @@ st.markdown(
     """
     <style>
     .stApp {
-        background: linear-gradient(180deg, #08111f 0%, #0d1b2a 100%);
-        color: #f5f7fa;
+        background: linear-gradient(180deg, #f5f8fc 0%, #edf3fb 100%);
+        color: #142235;
+    }
+
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #eaf2fb 0%, #dde9f8 100%);
+        border-right: 1px solid #c8d8ee;
     }
 
     .main-title {
         font-size: 2.8rem;
         font-weight: 800;
-        color: #ffffff;
+        color: #163b68;
         margin-bottom: 0.2rem;
     }
 
     .sub-title {
         font-size: 1rem;
-        color: #b8c4d6;
-        margin-bottom: 1.5rem;
+        color: #476383;
+        margin-bottom: 1.2rem;
     }
 
     .hero-box {
-        background: linear-gradient(135deg, #0f172a 0%, #10253e 100%);
-        border: 1px solid rgba(0, 255, 170, 0.25);
+        background: linear-gradient(135deg, #ffffff 0%, #f5f9ff 100%);
+        border: 1px solid #cfe0f5;
         border-radius: 18px;
         padding: 20px 24px;
         margin-bottom: 18px;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+        box-shadow: 0 8px 22px rgba(16, 46, 80, 0.08);
     }
 
     .card {
-        background: rgba(255, 255, 255, 0.04);
-        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: #ffffff;
+        border: 1px solid #d8e4f4;
         border-radius: 18px;
         padding: 18px;
-        box-shadow: 0 8px 20px rgba(0,0,0,0.20);
+        box-shadow: 0 6px 18px rgba(20, 34, 53, 0.06);
         margin-bottom: 16px;
+        color: #142235;
     }
 
     .best-bet {
-        background: linear-gradient(135deg, #052e2b 0%, #0b3d2e 100%);
-        border: 1px solid rgba(0, 255, 170, 0.45);
+        background: linear-gradient(135deg, #ffffff 0%, #eef5ff 100%);
+        border: 1px solid #bfd7f5;
         border-radius: 18px;
         padding: 18px;
-        box-shadow: 0 8px 24px rgba(0, 255, 170, 0.10);
+        box-shadow: 0 6px 18px rgba(20, 34, 53, 0.06);
         margin-bottom: 16px;
+        color: #142235;
     }
 
     .section-title {
-        font-size: 1.3rem;
+        font-size: 1.25rem;
         font-weight: 700;
-        color: #ffffff;
+        color: #163b68;
         margin-top: 10px;
         margin-bottom: 10px;
     }
 
     .small-label {
-        color: #92a3b8;
+        color: #5c7899;
         font-size: 0.90rem;
     }
 
     .big-value {
-        color: #00f5b4;
-        font-size: 1.6rem;
+        color: #1a4f8b;
+        font-size: 1.55rem;
         font-weight: 800;
     }
 
-    div[data-baseweb="select"] > div {
-        color: black !important;
+    .kpi-note {
+        color: #5f7894;
+        font-size: 0.88rem;
+        margin-bottom: 0.6rem;
     }
 
-    div[data-baseweb="select"] input {
-        color: black !important;
+    .stMetric {
+        background: #ffffff;
+        border: 1px solid #d8e4f4;
+        border-radius: 16px;
+        padding: 8px 12px;
+        box-shadow: 0 6px 18px rgba(20, 34, 53, 0.05);
+    }
+
+    div[data-baseweb="select"] > div,
+    div[data-baseweb="base-input"] > div {
+        color: #111111 !important;
+        background: #ffffff !important;
+    }
+
+    div[data-baseweb="select"] input,
+    div[data-baseweb="base-input"] input {
+        color: #111111 !important;
     }
     </style>
     """,
@@ -506,10 +534,9 @@ if st.sidebar.button("Refresh now"):
     st.cache_data.clear()
     st.rerun()
 
-
 st.markdown('<div class="main-title">🏈 Sports Betting Dashboard</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="sub-title">Auto-refreshing odds board with smarter bet scoring and stake sizing.</div>',
+    '<div class="sub-title">Cleaner look, sharper KPIs, and a chart-first home tab built on your stable version.</div>',
     unsafe_allow_html=True,
 )
 
@@ -551,6 +578,8 @@ def render_live_dashboard():
     open_risk = int(live_bets["Recommended Bet"].sum()) if not live_bets.empty else 0
     active_bets = int(len(live_bets))
     refresh_time = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
+    strong_alerts = strong_shop_alerts(live_bets)
+    avg_books = float(live_bets["Books Quoting"].mean()) if not live_bets.empty else 0.0
 
     st.markdown('<div class="hero-box">', unsafe_allow_html=True)
     hero_left, hero_right = st.columns([2, 1])
@@ -565,6 +594,7 @@ def render_live_dashboard():
                 Book: **{best_row['Sportsbook']}** · Odds: **{best_row['Odds']}**  
                 Edge: **{best_row['Edge %']:.2f}%** · Score: **{best_row['Bet Score']:.2f}** · Confidence: **{best_row['Confidence']}**  
                 Recommended Bet: **${best_row['Recommended Bet']}**  
+                Time To Start: **{format_minutes(best_row['Minutes To Start'])}**  
                 Reason: *{best_row['Reason']}*
                 """
             )
@@ -583,21 +613,28 @@ def render_live_dashboard():
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    k1, k2, k3, k4, k5 = st.columns(5)
-    with k1:
-        st.metric("Recommended Bets", active_bets)
-    with k2:
-        st.metric("Best Edge", f"{best_edge:.2f}%")
-    with k3:
-        st.metric("Average Edge", f"{avg_edge:.2f}%")
-    with k4:
-        st.metric("Average Score", f"{avg_score:.2f}")
-    with k5:
-        st.metric("Open Risk", f"${open_risk}")
+    st.markdown('<div class="section-title">KPI Ribbon</div>', unsafe_allow_html=True)
+    st.markdown('<div class="kpi-note">This version focuses on live-board quality and shopping strength. ROI and settled P/L can be added when we add tracking back in.</div>', unsafe_allow_html=True)
 
-    st.info(
-        "This version is now auto-refreshing and stake-sizing. It still uses odds-market structure only; the next layer is adding injuries, recent form, and results tracking."
-    )
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.metric("Current Bankroll", f"${bankroll:,.0f}")
+    with k2:
+        st.metric("Recommended Bets", active_bets)
+    with k3:
+        st.metric("Best Edge", f"{best_edge:.2f}%")
+    with k4:
+        st.metric("Average Edge", f"{avg_edge:.2f}%")
+
+    k5, k6, k7, k8 = st.columns(4)
+    with k5:
+        st.metric("Average Score", f"{avg_score:.2f}")
+    with k6:
+        st.metric("Open Risk", f"${open_risk}")
+    with k7:
+        st.metric("Strong Shop Alerts", strong_alerts)
+    with k8:
+        st.metric("Avg Books Compared", f"{avg_books:.1f}")
 
     tabs = st.tabs(
         [
@@ -612,11 +649,11 @@ def render_live_dashboard():
     )
 
     with tabs[0]:
-        left, right = st.columns([1.4, 1])
+        top_left, top_right = st.columns([1.35, 1])
 
-        with left:
+        with top_left:
             st.markdown('<div class="section-title">Top Recommended Bets</div>', unsafe_allow_html=True)
-            top_df = live_bets.head(5)
+            top_df = live_bets.head(3)
 
             if top_df.empty:
                 st.warning("No recommended bets available right now.")
@@ -630,7 +667,7 @@ def render_live_dashboard():
                             {row['Event']} · {row['Market']}<br>
                             Book: <b>{row['Sportsbook']}</b> · Odds: <b>{row['Odds']}</b><br>
                             Edge: <b>{row['Edge %']:.2f}%</b> · Score: <b>{row['Bet Score']:.2f}</b> · Confidence: <b>{row['Confidence']}</b><br>
-                            Suggested Stake: <b>${row['Recommended Bet']}</b><br>
+                            Suggested Stake: <b>${row['Recommended Bet']}</b> · Time To Start: <b>{format_minutes(row['Minutes To Start'])}</b><br>
                             Reason: <i>{row['Reason']}</i>
                             {link_html}
                         </div>
@@ -638,26 +675,82 @@ def render_live_dashboard():
                         unsafe_allow_html=True,
                     )
 
-        with right:
-            st.markdown('<div class="section-title">How the score works</div>', unsafe_allow_html=True)
+        with top_right:
+            st.markdown('<div class="section-title">How to read the board</div>', unsafe_allow_html=True)
             st.markdown(
                 """
                 <div class="card">
-                • Better price than the group consensus helps<br>
-                • More books quoting the same outcome boosts confidence<br>
-                • Main markets rank higher than props<br>
-                • Bets very close to lock get penalized<br>
-                • PrizePicks is treated more cautiously
+                • <b>Best Edge</b> shows the strongest current price gap versus consensus.<br>
+                • <b>Strong Shop Alerts</b> highlight outcomes with wider price separation across books.<br>
+                • <b>Average Score</b> reflects your current board quality after market/time/book adjustments.<br>
+                • <b>Open Risk</b> is the sum of all suggested live bet sizes.
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
+
+        st.markdown('<div class="section-title">Live Dashboard Charts</div>', unsafe_allow_html=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown("**Recommended Bets by Sportsbook**")
+            if live_bets.empty:
+                st.info("No chart data available.")
+            else:
+                chart_df = live_bets.groupby("Sportsbook").size().rename("Recommended Bets")
+                st.bar_chart(chart_df)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        with c2:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown("**Average Edge by Sportsbook**")
+            if live_bets.empty:
+                st.info("No chart data available.")
+            else:
+                chart_df = live_bets.groupby("Sportsbook")["Edge %"].mean().sort_values(ascending=False)
+                st.bar_chart(chart_df)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        c3, c4 = st.columns(2)
+        with c3:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown("**Recommended Bets by Sport**")
+            if live_bets.empty:
+                st.info("No chart data available.")
+            else:
+                chart_df = live_bets.groupby("Sport").size().rename("Recommended Bets")
+                st.bar_chart(chart_df)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        with c4:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown("**Confidence Mix**")
+            if live_bets.empty:
+                st.info("No chart data available.")
+            else:
+                order = ["Elite", "High", "Medium", "Low"]
+                chart_df = live_bets["Confidence"].value_counts().reindex(order).fillna(0)
+                st.bar_chart(chart_df)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="section-title">Top Edge vs Score Snapshot</div>', unsafe_allow_html=True)
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        if live_bets.empty:
+            st.info("No chart data available.")
+        else:
+            chart_df = live_bets.head(8).copy()
+            chart_df["Label"] = chart_df["Pick"].str.slice(0, 28)
+            chart_df = chart_df.set_index("Label")[["Edge %", "Bet Score"]]
+            st.line_chart(chart_df)
+        st.markdown('</div>', unsafe_allow_html=True)
 
     with tabs[1]:
         st.markdown('<div class="section-title">Best Bets Board</div>', unsafe_allow_html=True)
 
         display_df = filtered_df.copy()
         display_df["Link"] = display_df["Link"].apply(make_link_markdown)
+        display_df["Minutes To Start"] = display_df["Minutes To Start"].apply(format_minutes)
         display_df = display_df[
             [
                 "Sport",
@@ -675,6 +768,7 @@ def render_live_dashboard():
                 "Bet Score",
                 "Confidence",
                 "Recommended Bet",
+                "Minutes To Start",
                 "Status",
                 "Reason",
                 "Link",
@@ -688,9 +782,13 @@ def render_live_dashboard():
             column_config={
                 "Implied Prob": st.column_config.NumberColumn(format="%.2f%%"),
                 "Model Prob": st.column_config.NumberColumn(format="%.2f%%"),
-                "Edge %": st.column_config.NumberColumn(format="%.2f%%"),
+                "Edge %": st.column_config.ProgressColumn(
+                    "Edge %", min_value=0.0, max_value=max(float(display_df["Edge %"].max()), 1.0), format="%.2f%%"
+                ),
                 "Best Line Gap %": st.column_config.NumberColumn(format="%.2f%%"),
-                "Bet Score": st.column_config.NumberColumn(format="%.2f"),
+                "Bet Score": st.column_config.ProgressColumn(
+                    "Bet Score", min_value=0.0, max_value=max(float(display_df["Bet Score"].max()), 1.0), format="%.2f"
+                ),
                 "Recommended Bet": st.column_config.NumberColumn(format="$%d"),
                 "Link": st.column_config.LinkColumn("Open"),
             },
@@ -713,7 +811,7 @@ def render_live_dashboard():
                 <div class="card">
                 <b>{book_name}</b><br>
                 This tab shows live lines from the selected leagues, ranked by the smarter scoring engine.<br>
-                The goal is not just "best price" now — it is best price with confidence controls.
+                The goal is not just best price — it is best price with confidence and timing controls.
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -737,6 +835,7 @@ def render_live_dashboard():
             return
 
         book_df["Link"] = book_df["Link"].apply(make_link_markdown)
+        book_df["Minutes To Start"] = book_df["Minutes To Start"].apply(format_minutes)
         book_df = book_df[
             [
                 "Sport",
@@ -749,6 +848,7 @@ def render_live_dashboard():
                 "Bet Score",
                 "Confidence",
                 "Recommended Bet",
+                "Minutes To Start",
                 "Status",
                 "Reason",
                 "Link",
@@ -760,8 +860,12 @@ def render_live_dashboard():
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Edge %": st.column_config.NumberColumn(format="%.2f%%"),
-                "Bet Score": st.column_config.NumberColumn(format="%.2f"),
+                "Edge %": st.column_config.ProgressColumn(
+                    "Edge %", min_value=0.0, max_value=max(float(book_df["Edge %"].max()), 1.0), format="%.2f%%"
+                ),
+                "Bet Score": st.column_config.ProgressColumn(
+                    "Bet Score", min_value=0.0, max_value=max(float(book_df["Bet Score"].max()), 1.0), format="%.2f"
+                ),
                 "Recommended Bet": st.column_config.NumberColumn(format="$%d"),
                 "Link": st.column_config.LinkColumn("Open"),
             },
@@ -782,7 +886,7 @@ def render_live_dashboard():
     with tabs[6]:
         st.markdown('<div class="section-title">Bankroll Management</div>', unsafe_allow_html=True)
 
-        b1, b2, b3 = st.columns(3)
+        b1, b2, b3, b4 = st.columns(4)
         with b1:
             st.markdown(
                 f"""
@@ -809,6 +913,16 @@ def render_live_dashboard():
                 <div class="card">
                 <div class="small-label">Maximum Bet</div>
                 <div class="big-value">${max_bet:.0f}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with b4:
+            st.markdown(
+                f"""
+                <div class="card">
+                <div class="small-label">Open Suggested Risk</div>
+                <div class="big-value">${open_risk:.0f}</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
