@@ -44,6 +44,50 @@ LEAGUE_TO_NEWS = {
 }
 
 
+def get_news_feed_names(leagues):
+    names = ["Top Headlines"]
+    for league in leagues or []:
+        mapped = LEAGUE_TO_NEWS.get(league)
+        if mapped and mapped in NEWS_FEEDS and mapped not in names:
+            names.append(mapped)
+    return names
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_news_feed(feed_name, limit=12):
+    url = NEWS_FEEDS.get(feed_name)
+    if not url:
+        return []
+    try:
+        resp = requests.get(url, timeout=20)
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+        items = []
+        for item in root.findall(".//item")[:limit]:
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            pub_date = (item.findtext("pubDate") or "").strip()
+            description = (item.findtext("description") or "").strip()
+            items.append({
+                "feed": feed_name,
+                "title": title,
+                "link": link,
+                "pub_date": pub_date,
+                "description": description,
+            })
+        return items
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_news_items_for_leagues(leagues, per_feed=5):
+    items = []
+    for feed_name in get_news_feed_names(leagues):
+        items.extend(fetch_news_feed(feed_name, limit=per_feed))
+    return items
+
+
 # -----------------------------
 # BASIC HELPERS
 # -----------------------------
@@ -1306,6 +1350,8 @@ def render_live_dashboard():
     with k8:
         kpi_card("Watchlist Hits", watchlist_hits)
 
+    news_items = fetch_news_items_for_leagues(league_filter, per_feed=4)
+
     tabs = st.tabs([
         "Home",
         "Sports News",
@@ -1476,8 +1522,8 @@ def render_live_dashboard():
                 unsafe_allow_html=True,
             )
 
-            if news_items:
-                feed_counts = pd.Series([item.get("feed", "News") for item in news_items]).value_counts()
+            if selected_news:
+                feed_counts = pd.Series([item.get("feed", "News") for item in selected_news]).value_counts()
                 st.markdown('<div class="section-title">Loaded Headlines by Feed</div>', unsafe_allow_html=True)
                 st.bar_chart(feed_counts)
             else:
