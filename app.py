@@ -1,5 +1,7 @@
-from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from html import escape
+importfrom datetime import datetime, timezone
+ re
 import xml.etree.ElementTree as ET
 
 import pandas as pd
@@ -42,6 +44,13 @@ LEAGUE_TO_NEWS = {
     "MLB": "MLB",
     "NHL": "NHL",
 }
+HEADLINE_POSITIVE_WORDS = {"streak", "streaking", "hot", "surge", "rolling", "dominant", "dominance", "healthy", "returns", "returning", "breakout", "heater", "homer", "home run", "wins", "winning"}
+HEADLINE_NEGATIVE_WORDS = {"injury", "injured", "out", "questionable", "doubtful", "miss", "missing", "slump", "cold", "struggle", "struggling", "scratch", "sits", "ruled out", "day-to-day"}
+HEADLINE_WEATHER_WORDS = {"rain", "wind", "snow", "weather", "storm", "cold", "heat"}
+HEADLINE_SURFACE_WORDS = {"turf", "grass", "surface"}
+HEADLINE_TIME_WORDS = {"morning", "afternoon", "night", "early", "late", "matinee"}
+HEADLINE_STREAK_WORDS = {"streak", "streaking", "heater", "homer", "home run", "hit streak", "hot"}
+EVENT_STOPWORDS = {"vs", "at", "the", "and", "for", "with", "from", "new", "los", "angeles", "san", "city", "york", "las", "vegas"}
 
 
 def get_news_feed_names(leagues):
@@ -86,6 +95,156 @@ def fetch_news_items_for_leagues(leagues, per_feed=5):
     for feed_name in get_news_feed_names(leagues):
         items.extend(fetch_news_feed(feed_name, limit=per_feed))
     return items
+
+
+def event_terms_from_row(row):
+    event_text = str(row.get("Event", "")).replace("@", " ")
+    tokens = []
+    for part in re.split(r"[^A-Za-z0-9]+", event_text.lower()):
+        part = part.strip()
+        if len(part) >= 3 and part not in EVENT_STOPWORDS:
+            tokens.append(part)
+    return list(dict.fromkeys(tokens))[:8]
+
+
+def daypart_from_start(value):
+    dt = parse_iso_datetime(value)
+    if dt is None:
+        return "Unknown"
+    eastern = dt.astimezone(ZoneInfo("America/New_York"))
+    hour = eastern.hour
+    if 5 <= hour < 11:
+        return "Morning"
+    if 11 <= hour < 16:
+        return "Afternoon"
+    if 16 <= hour < 21:
+        return "Evening"
+    return "Night"
+
+
+def build_headline_context(row, news_items):
+    terms = event_terms_from_row(row)
+    matched = []
+    for item in news_items or []:
+        haystack = f"{item.get('title', '')} {item.get('description', '')}".lower()
+        if any(term in haystack for term in terms):
+            matched.append(haystack)
+
+    joined = " || ".join(matched)
+    positive_hits = sum(1 for word in HEADLINE_POSITIVE_WORDS if word in joined)
+    negative_hits = sum(1 for word in HEADLINE_NEGATIVE_WORDS if word in joined)
+    weather_hits = sum(1 for word in HEADLINE_WEATHER_WORDS if word in joined)
+    surface_hits = sum(1 for word in HEADLINE_SURFACE_WORDS if word in joined)
+    streak_hits = sum(1 for word in HEADLINE_STREAK_WORDS if word in joined)
+    time_hits = sum(1 for word in HEADLINE_TIME_WORDS if word in joined)
+
+    tags = []
+    if positive_hits:
+        tags.append("Positive News")
+    if negative_hits:
+        tags.append("Injury / Risk News")
+    if weather_hits:
+        tags.append("Weather Watch")
+    if surface_hits:
+        tags.append("Surface Note")
+    if streak_hits:
+        tags.append("Streak Signal")
+    if time_hits:
+        tags.append("Timing Angle")
+
+    return {
+        "headline_matches": len(matched),
+        "positive_hits": positive_hits,
+        "negative_hits": negative_hits,
+        "weather_hits": weather_hits,
+        "surface_hits": surface_hits,
+        "streak_hits": streak_hits,
+        "time_hits": time_hits,
+        "tags": tags,
+    }
+
+
+def build_context_reason(row):
+    parts = []
+    if row.get("Headline Matches", 0) > 0:
+        parts.append(f"{int(row['Headline Matches'])} related headline hits")
+    if row.get("Positive News Hits", 0) > 0:
+        parts.append("positive headline tone")
+    if row.get("Negative News Hits", 0) > 0:
+        parts.append("injury/risk headline tone")
+    if row.get("Weather Hits", 0) > 0:
+        parts.append("weather mention in related news")
+    if row.get("Surface Hits", 0) > 0:
+        parts.append("surface mention in related news")
+    if row.get("Streak Hits", 0) > 0:
+        parts.append("recent streak angle detected")
+    if row.get("Move Label") == "Improving":
+        parts.append("line is moving in your favor")
+    if row.get("Move Label") == "Worse":
+        parts.append("line moved against you")
+    daypart = row.get("Daypart", "")
+    if daypart and daypart != "Unknown":
+        parts.append(f"{daypart.lower()} game window")
+    return " • ".join(parts)
+
+
+def apply_context_ai(df, news_items, min_bet, max_bet):
+    if df.empty:
+        return df
+
+    contexts = [build_headline_context(row, news_items) for _, row in df.iterrows()]
+    ctx_df = pd.DataFrame(contexts)
+    enriched = pd.concat([df.reset_index(drop=True), ctx_df.reset_index(drop=True)], axis=1)
+    enriched["Daypart"] = enriched["Start Time"].apply(daypart_from_start)
+
+    enriched["Headline Matches"] = enriched["headline_matches"].fillna(0).astype(int)
+    enriched["Positive News Hits"] = enriched["positive_hits"].fillna(0).astype(int)
+    enriched["Negative News Hits"] = enriched["negative_hits"].fillna(0).astype(int)
+    enriched["Weather Hits"] = enriched["weather_hits"].fillna(0).astype(int)
+    enriched["Surface Hits"] = enriched["surface_hits"].fillna(0).astype(int)
+    enriched["Streak Hits"] = enriched["streak_hits"].fillna(0).astype(int)
+    enriched["Time News Hits"] = enriched["time_hits"].fillna(0).astype(int)
+    enriched["Context Tags"] = enriched["tags"].apply(lambda vals: ", ".join(vals[:3]) if vals else "No major context flags")
+
+    move_bonus = enriched["Move Label"].map({"Improving": 0.60, "Flat": 0.00, "Worse": -0.60, "New": 0.10}).fillna(0.0)
+    positive_bonus = (enriched["Positive News Hits"].clip(upper=2) * 0.35)
+    negative_penalty = (enriched["Negative News Hits"].clip(upper=3) * -0.45)
+    weather_penalty = enriched.apply(lambda row: -0.30 if row["Weather Hits"] > 0 and row["Market Bucket"] in {"Total", "Player Prop", "DFS Prop"} else (-0.10 if row["Weather Hits"] > 0 else 0.0), axis=1)
+    surface_bonus = enriched.apply(lambda row: 0.20 if row["Surface Hits"] > 0 and row["Market Bucket"] in {"Spread", "Total"} else 0.0, axis=1)
+    streak_bonus = enriched.apply(lambda row: 0.35 if row["Streak Hits"] > 0 and row["Market Bucket"] in {"Player Prop", "DFS Prop", "Moneyline"} else 0.15 if row["Streak Hits"] > 0 else 0.0, axis=1)
+    books_bonus = enriched["Books Quoting"].apply(lambda x: 0.15 if x >= 3 else 0.0)
+
+    enriched["Context Score"] = (move_bonus + positive_bonus + negative_penalty + weather_penalty + surface_bonus + streak_bonus + books_bonus).round(2)
+    enriched["AI Score"] = (enriched["Bet Score"] + enriched["Context Score"]).round(2)
+    enriched["Confidence"] = enriched["AI Score"].apply(confidence_from_score)
+    enriched["Recommended Bet"] = enriched.apply(
+        lambda row: bet_size_from_score(
+            edge=row["Edge %"],
+            score=row["AI Score"],
+            min_bet=min_bet,
+            max_bet=max_bet,
+        ),
+        axis=1,
+    )
+    enriched["Status"] = enriched["Recommended Bet"].apply(lambda x: "Bet" if x > 0 else "No Bet")
+    enriched["AI Reason"] = enriched.apply(build_context_reason, axis=1)
+    enriched["Reason"] = enriched.apply(
+        lambda row: row["Reason"] + (" • " + row["AI Reason"] if row["AI Reason"] else ""),
+        axis=1,
+    )
+    enriched["Rank Score"] = enriched["AI Score"]
+    return enriched
+
+
+def build_decision_center_insight(live_bets):
+    if live_bets is None or live_bets.empty:
+        return "No final bets qualify right now. The board is waiting for a stronger edge or cleaner context setup."
+    top = live_bets.iloc[0]
+    tags = top.get("Context Tags", "No major context flags")
+    return (
+        f"Top board lean is {top['Pick']} at {top['Sportsbook']} because the AI score is {top['AI Score']:.2f}, "
+        f"the market edge is {top['Edge %']:.2f}%, and the context lens is seeing {tags.lower()}."
+    )
 
 
 # -----------------------------
@@ -738,8 +897,9 @@ def apply_risk_controls(
     main_event_taken = set()
     prop_event_counts = {}
 
+    sort_score = "Rank Score" if "Rank Score" in controlled.columns else "Bet Score"
     candidates = controlled[controlled["Status"] == "Bet"].sort_values(
-        ["Bet Score", "Edge %", "Books Quoting", "Market Rank"],
+        [sort_score, "Edge %", "Books Quoting", "Market Rank"],
         ascending=[False, False, False, True],
     )
 
@@ -1136,6 +1296,41 @@ st.markdown(
         100% { transform: translateX(-100%); }
     }
 
+    .decision-card {
+        background: linear-gradient(135deg, #ffffff 0%, #f5f9ff 100%);
+        border: 1px solid #d6e4f5;
+        border-radius: 18px;
+        padding: 18px;
+        box-shadow: 0 8px 20px rgba(22, 59, 104, 0.07);
+        margin-bottom: 16px;
+    }
+
+    .decision-title {
+        color: #163b68;
+        font-size: 1.1rem;
+        font-weight: 800;
+        margin-bottom: 8px;
+    }
+
+    .decision-big {
+        color: #0f2745;
+        font-size: 1.4rem;
+        font-weight: 900;
+        line-height: 1.25;
+    }
+
+    .decision-sub {
+        color: #49627f;
+        font-size: 0.95rem;
+        margin-top: 8px;
+    }
+
+    .context-list {
+        margin: 0;
+        padding-left: 18px;
+        color: #294866;
+    }
+
     .news-card {
         background: linear-gradient(135deg, #ffffff 0%, #f5f9ff 100%);
         border: 1px solid #d6e5f6;
@@ -1246,9 +1441,11 @@ def render_live_dashboard():
         st.warning("No live odds came back for the leagues selected.")
         return
 
+    news_items = fetch_news_items_for_leagues(league_filter, per_feed=4)
     scored_df = apply_smart_scoring(raw_df, min_bet=min_bet, max_bet=max_bet)
     moved_df = apply_line_movement(scored_df)
-    filtered_df = moved_df[moved_df["Sportsbook"].isin(book_filter)].copy()
+    ai_df = apply_context_ai(moved_df, news_items=news_items, min_bet=min_bet, max_bet=max_bet)
+    filtered_df = ai_df[ai_df["Sportsbook"].isin(book_filter)].copy()
     filtered_df = apply_risk_controls(
         filtered_df,
         min_bet=min_bet,
@@ -1272,7 +1469,7 @@ def render_live_dashboard():
     status_order = {"Bet": 2, "Pass": 1, "No Bet": 0}
     filtered_df["Status Rank"] = filtered_df["Final Status"].map(status_order).fillna(0)
     filtered_df = filtered_df.sort_values(
-        ["Status Rank", "Bet Score", "Edge %", "Books Quoting", "Market Rank"],
+        ["Status Rank", "AI Score", "Edge %", "Books Quoting", "Market Rank"],
         ascending=[False, False, False, False, True],
     )
 
@@ -1280,7 +1477,7 @@ def render_live_dashboard():
     best_row = live_bets.iloc[0] if not live_bets.empty else None
     best_edge = float(live_bets["Edge %"].max()) if not live_bets.empty else 0.0
     avg_edge = float(live_bets["Edge %"].mean()) if not live_bets.empty else 0.0
-    avg_score = float(live_bets["Bet Score"].mean()) if not live_bets.empty else 0.0
+    avg_score = float(live_bets["AI Score"].mean()) if not live_bets.empty else 0.0
     open_risk = int(live_bets["Final Bet"].sum()) if not live_bets.empty else 0
     active_bets = int(len(live_bets))
     refresh_time = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
@@ -1304,7 +1501,7 @@ def render_live_dashboard():
                 **{best_row['Pick']}**  
                 {best_row['Event']} · {best_row['Market']}  
                 Book: **{best_row['Sportsbook']}** · Odds: **{best_row['Odds']}** · Previous: **{best_row['Prev Odds']}**  
-                Edge: **{best_row['Edge %']:.2f}%** · Score: **{best_row['Bet Score']:.2f}** · Final Bet: **${int(best_row['Final Bet'])}**  
+                Edge: **{best_row['Edge %']:.2f}%** · AI Score: **{best_row['AI Score']:.2f}** · Final Bet: **${int(best_row['Final Bet'])}**  
                 Line Move: **{best_row['Line Move %']:+.2f}%** · Time To Start: **{format_minutes(best_row['Minutes To Start'])}**  
                 Reason: *{best_row['Pass Reason'] or best_row['Reason']}*  
                 {pills}
@@ -1350,8 +1547,6 @@ def render_live_dashboard():
     with k8:
         kpi_card("Watchlist Hits", watchlist_hits)
 
-    news_items = fetch_news_items_for_leagues(league_filter, per_feed=4)
-
     tabs = st.tabs([
         "Home",
         "Sports News",
@@ -1364,14 +1559,30 @@ def render_live_dashboard():
     ])
 
     with tabs[0]:
-        top_left, top_right = st.columns([1.35, 1])
+
+        top_left, top_right = st.columns([1.25, 1])
 
         with top_left:
-            st.markdown('<div class="section-title">Top Final Bets</div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-title">Decision Center · Bet of the Day</div>', unsafe_allow_html=True)
             top_df = live_bets.head(3)
             if top_df.empty:
                 st.warning("No final bets available right now.")
             else:
+                first = top_df.iloc[0]
+                st.markdown(
+                    f"""
+                    <div class="decision-card">
+                        <div class="decision-title">Featured Bet</div>
+                        <div class="decision-big">{first['Pick']}</div>
+                        <div class="decision-sub">{first['Event']} · {first['Market']} · {first['Sportsbook']} {first['Odds']}</div>
+                        <div class="decision-sub">AI Score {first['AI Score']:.2f} · Edge {first['Edge %']:.2f}% · Final Bet ${int(first['Final Bet'])}</div>
+                        <div class="decision-sub">{first['Pass Reason'] or first['Reason']}</div>
+                        {build_badges_html(first)}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                st.markdown('<div class="section-title">Top Final Bets</div>', unsafe_allow_html=True)
                 for _, row in top_df.iterrows():
                     link_html = f'<br><a href="{row["Link"]}" target="_blank">Open bet page</a>' if row["Link"] else ""
                     st.markdown(
@@ -1380,10 +1591,11 @@ def render_live_dashboard():
                             <b>{row['Pick']}</b><br>
                             {row['Event']} · {row['Market']}<br>
                             Book: <b>{row['Sportsbook']}</b> · Odds: <b>{row['Odds']}</b> · Prev: <b>{row['Prev Odds']}</b><br>
-                            Edge: <b>{row['Edge %']:.2f}%</b> · Score: <b>{row['Bet Score']:.2f}</b> · Confidence: <b>{row['Confidence']}</b><br>
+                            Edge: <b>{row['Edge %']:.2f}%</b> · AI Score: <b>{row['AI Score']:.2f}</b> · Confidence: <b>{row['Confidence']}</b><br>
                             Final Bet: <b>${int(row['Final Bet'])}</b> · Move: <b>{row['Line Move %']:+.2f}% ({row['Move Label']})</b><br>
                             Decision: <b>{row['Allocation Status']}</b> {row['Watchlist Label']}<br>
                             {build_badges_html(row)}<br>
+                            Context: <b>{row['Context Tags']}</b><br>
                             Reason: <i>{row['Pass Reason'] or row['Reason']}</i>
                             {link_html}
                         </div>
@@ -1392,30 +1604,54 @@ def render_live_dashboard():
                     )
 
         with top_right:
-            st.markdown('<div class="section-title">Board Logic</div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-title">Decision Center · AI Insight</div>', unsafe_allow_html=True)
             st.markdown(
                 f"""
-                <div class="card">
-                • <b>Line movement</b> compares the current number to the last number seen in your live session.<br>
-                • <b>Correlation protection</b> is <b>{'On' if correlation_guard else 'Off'}</b>.<br>
-                • <b>Total exposure cap</b> is <b>${max_total_exposure:.0f}</b>.<br>
-                • <b>Sport / event / book / prop caps</b> trim or pass lower-ranked bets.<br>
-                • Bets tagged <b>Improving</b> have moved toward a better number for you since the last refresh.<br>
-                • <b>Watchlist filter</b> is {'active' if str(watchlist_query).strip() else 'off'} and currently flags <b>{watchlist_hits}</b> rows.
+                <div class="decision-card">
+                    <div class="decision-title">Insight of the Day</div>
+                    <div class="decision-sub">{build_decision_center_insight(live_bets)}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            context_watch = live_bets.head(5) if not live_bets.empty else pd.DataFrame()
+            injury_flags = int((context_watch['Negative News Hits'] > 0).sum()) if not context_watch.empty else 0
+            weather_flags = int((context_watch['Weather Hits'] > 0).sum()) if not context_watch.empty else 0
+            streak_flags = int((context_watch['Streak Hits'] > 0).sum()) if not context_watch.empty else 0
+            st.markdown(
+                f"""
+                <div class="decision-card">
+                    <div class="decision-title">Context Watch</div>
+                    <ul class="context-list">
+                        <li>Headline-linked bets on board: <b>{int((live_bets['Headline Matches'] > 0).sum()) if not live_bets.empty else 0}</b></li>
+                        <li>Injury / risk news flags: <b>{injury_flags}</b></li>
+                        <li>Weather flags: <b>{weather_flags}</b></li>
+                        <li>Streak signals: <b>{streak_flags}</b></li>
+                        <li>Improving lines: <b>{improving_count}</b></li>
+                    </ul>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"""
+                <div class="decision-card">
+                    <div class="decision-title">Risk Gauge</div>
+                    <div class="decision-sub">Open suggested exposure is <b>${open_risk}</b> against a max total cap of <b>${max_total_exposure:.0f}</b>.</div>
+                    <div class="decision-sub">Average AI score on final bets is <b>{avg_score:.2f}</b> across <b>{active_bets}</b> bets.</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
-        st.markdown('<div class="section-title">Live Dashboard Charts</div>', unsafe_allow_html=True)
         c1, c2 = st.columns(2)
         with c1:
             st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown("**Final Bets by Sportsbook**")
+            st.markdown("**AI Score by Sportsbook**")
             if live_bets.empty:
                 st.info("No chart data available.")
             else:
-                chart_df = live_bets.groupby("Sportsbook").size().rename("Final Bets")
+                chart_df = live_bets.groupby("Sportsbook")["AI Score"].mean().sort_values(ascending=False)
                 st.bar_chart(chart_df)
             st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1441,11 +1677,16 @@ def render_live_dashboard():
 
         with c4:
             st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown("**Allocation Decisions**")
-            if filtered_df.empty:
+            st.markdown("**Context Flags on Final Bets**")
+            if live_bets.empty:
                 st.info("No chart data available.")
             else:
-                chart_df = filtered_df["Allocation Status"].value_counts()
+                chart_df = pd.Series({
+                    "Headline Hits": int((live_bets["Headline Matches"] > 0).sum()),
+                    "Injury News": int((live_bets["Negative News Hits"] > 0).sum()),
+                    "Weather": int((live_bets["Weather Hits"] > 0).sum()),
+                    "Streaks": int((live_bets["Streak Hits"] > 0).sum()),
+                })
                 st.bar_chart(chart_df)
             st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1461,24 +1702,14 @@ def render_live_dashboard():
 
         with c6:
             st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown("**Confidence Mix**")
+            st.markdown("**AI Score vs Edge Snapshot**")
             if live_bets.empty:
                 st.info("No chart data available.")
             else:
-                chart_df = live_bets["Confidence"].value_counts().reindex(["Elite", "High", "Medium", "Low"]).fillna(0)
-                st.bar_chart(chart_df)
+                chart_df = live_bets[["Pick", "AI Score", "Edge %"]].head(8).set_index("Pick")
+                st.line_chart(chart_df)
             st.markdown('</div>', unsafe_allow_html=True)
 
-        st.markdown('<div class="section-title">Top Edge vs Score Snapshot</div>', unsafe_allow_html=True)
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        if live_bets.empty:
-            st.info("No chart data available.")
-        else:
-            chart_df = live_bets.head(8).copy()
-            chart_df["Label"] = chart_df["Pick"].str.slice(0, 30)
-            chart_df = chart_df.set_index("Label")[["Edge %", "Bet Score", "Line Move %"]]
-            st.line_chart(chart_df)
-        st.markdown('</div>', unsafe_allow_html=True)
 
     with tabs[1]:
         st.markdown('<div class="section-title">Sports News</div>', unsafe_allow_html=True)
@@ -1560,6 +1791,9 @@ def render_live_dashboard():
                 "Best Line Gap %",
                 "Books Quoting",
                 "Bet Score",
+                "AI Score",
+                "Context Score",
+                "Context Tags",
                 "Confidence",
                 "Recommended Bet",
                 "Final Bet",
@@ -1633,6 +1867,14 @@ def render_live_dashboard():
                             <div class="explain-stat-label">Line Gap</div>
                             <div class="explain-stat-value">{line_gap:.2f}%</div>
                         </div>
+                        <div class="explain-stat">
+                            <div class="explain-stat-label">AI Score</div>
+                            <div class="explain-stat-value">{explained_row['AI Score']:.2f}</div>
+                        </div>
+                        <div class="explain-stat">
+                            <div class="explain-stat-label">Context</div>
+                            <div class="explain-stat-value">{explained_row['Context Tags']}</div>
+                        </div>
                     </div>
                 </div>
                 """,
@@ -1704,6 +1946,9 @@ def render_live_dashboard():
                 "Line Move %",
                 "Edge %",
                 "Bet Score",
+                "AI Score",
+                "Context Score",
+                "Context Tags",
                 "Confidence",
                 "Recommended Bet",
                 "Final Bet",
