@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 import requests
 import streamlit as st
-
+import time
 st.set_page_config(
     page_title="Sports Betting Dashboard",
     page_icon="🏈",
