@@ -12,6 +12,7 @@ from email.message import EmailMessage
 from math import prod
 
 import altair as alt
+import hashlib
 import json
 import pandas as pd
 import requests
@@ -202,9 +203,10 @@ def db_init():
 
 def db_get_kv(key, default=None):
     _ensure_schema()
+    scoped = f"{_current_user()}::{key}"
     conn = db_conn()
     cur = conn.cursor()
-    cur.execute(_q("SELECT v FROM kv WHERE k=?"), (key,))
+    cur.execute(_q("SELECT v FROM kv WHERE k=?"), (scoped,))
     row = cur.fetchone()
     conn.close()
     if not row:
@@ -214,6 +216,7 @@ def db_get_kv(key, default=None):
 
 def db_set_kv(key, value):
     _ensure_schema()
+    scoped = f"{_current_user()}::{key}"
     conn = db_conn()
     cur = conn.cursor()
     if _use_pg():
@@ -222,28 +225,58 @@ def db_set_kv(key, value):
                 "INSERT INTO kv (k,v) VALUES (?,?) "
                 "ON CONFLICT (k) DO UPDATE SET v=EXCLUDED.v"
             ),
-            (key, str(value)),
+            (scoped, str(value)),
         )
     else:
         cur.execute(
             "INSERT OR REPLACE INTO kv (k,v) VALUES (?,?)",
-            (key, str(value)),
+            (scoped, str(value)),
         )
     conn.commit()
     conn.close()
 
 
+def _current_user():
+    return st.session_state.get("edge_user", "default")
+
+
+def _user_pin_hash(pin):
+    return hashlib.sha1(("edge:" + str(pin)).encode()).hexdigest()[:12]
+
+
 @st.cache_resource(show_spinner=False)
 def _ensure_schema():
     db_init()
+    conn = db_conn()
+    cur = conn.cursor()
+    if _use_pg():
+        try:
+            cur.execute(
+                'ALTER TABLE bets ADD COLUMN IF NOT EXISTS usr TEXT DEFAULT \'default\''
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            cur.execute(
+                "ALTER TABLE bets ADD COLUMN usr TEXT DEFAULT 'default'"
+            )
+        except Exception:
+            pass
+    conn.commit()
+    conn.close()
     return True
 
 
 def db_load_bets():
     _ensure_schema()
+    usr = _current_user()
     conn = db_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM bets ORDER BY created_at ASC")
+    cur.execute(
+        _q("SELECT * FROM bets WHERE usr=? ORDER BY created_at ASC"),
+        (usr,),
+    )
     cols = [d[0] for d in cur.description]
     rows = [dict(zip(cols, r)) for r in cur.fetchall()]
     conn.close()
@@ -252,18 +285,19 @@ def db_load_bets():
 
 def db_insert_bet(bet):
     _ensure_schema()
+    usr = _current_user()
     conn = db_conn()
     cur = conn.cursor()
     cur.execute(
         _q("""INSERT INTO bets
         (id, date, description, book, odds, stake, to_win, status, kind, legs,
-         created_at, settled_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"""),
+         created_at, settled_at, usr)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"""),
         (
             bet["id"], bet["date"], bet["description"], bet["book"],
             int(bet["odds"]), float(bet["stake"]), float(bet["to_win"]),
             bet["status"], bet.get("kind", "single"), bet.get("legs"),
-            bet["created_at"], bet.get("settled_at"),
+            bet["created_at"], bet.get("settled_at"), usr,
         ),
     )
     conn.commit()
@@ -272,11 +306,12 @@ def db_insert_bet(bet):
 
 def db_settle_bet(bet_id, status):
     _ensure_schema()
+    usr = _current_user()
     conn = db_conn()
     cur = conn.cursor()
     cur.execute(
-        _q("UPDATE bets SET status=?, settled_at=? WHERE id=?"),
-        (status, datetime.now(timezone.utc).isoformat(), bet_id),
+        _q("UPDATE bets SET status=?, settled_at=? WHERE id=? AND usr=?"),
+        (status, datetime.now(timezone.utc).isoformat(), bet_id, usr),
     )
     conn.commit()
     conn.close()
@@ -284,9 +319,10 @@ def db_settle_bet(bet_id, status):
 
 def db_delete_bet(bet_id):
     _ensure_schema()
+    usr = _current_user()
     conn = db_conn()
     cur = conn.cursor()
-    cur.execute(_q("DELETE FROM bets WHERE id=?"), (bet_id,))
+    cur.execute(_q("DELETE FROM bets WHERE id=? AND usr=?"), (bet_id, usr))
     conn.commit()
     conn.close()
 
@@ -307,11 +343,13 @@ def db_snapshot(rows, kind):
         return
     _ensure_schema()
     ts = datetime.now(timezone.utc).isoformat()
+    usr = _current_user()
     data = []
     for r in rows:
         key = pick_key_team(r) if kind == "team" else pick_key_prop(r)
+        scoped = f"{usr}::{key}"
         try:
-            data.append((key, ts, float(r["best_dec"]), int(round(r["price"]))))
+            data.append((scoped, ts, float(r["best_dec"]), int(round(r["price"]))))
         except (TypeError, ValueError):
             continue
     if not data:
@@ -331,12 +369,13 @@ def db_snapshot(rows, kind):
 
 def db_history(key, limit=30):
     _ensure_schema()
+    scoped = f"{_current_user()}::{key}"
     conn = db_conn()
     cur = conn.cursor()
     cur.execute(
         _q("SELECT best_dec FROM odds_history WHERE pick_key=? "
            "ORDER BY ts DESC LIMIT ?"),
-        (key, limit),
+        (scoped, limit),
     )
     vals = [r[0] for r in cur.fetchall()]
     conn.close()
@@ -1184,6 +1223,185 @@ def auto_grade_open_bets(open_bets, active_leagues):
     return graded
 
 
+# ---------------- Player prop auto-grader (#76) ----------------
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_player_boxscore(league, date_iso):
+    """Return list of {player, team, stats:{pts,reb,ast,...}} for a date."""
+    espn_lg = {
+        "NBA": "basketball/nba", "WNBA": "basketball/wnba",
+        "NFL": "football/nfl", "NCAAF": "football/college-football",
+        "MLB": "baseball/mlb", "NHL": "hockey/nhl",
+        "MLS": "soccer/usa.1", "EPL": "soccer/eng.1",
+    }
+    path = espn_lg.get(league)
+    if not path:
+        return []
+    try:
+        ymd = date_iso.replace("-", "")
+        url = (
+            f"https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
+            f"?dates={ymd}"
+        )
+        r = requests.get(url, timeout=8)
+        if r.status_code != 200:
+            return []
+        events = (r.json() or {}).get("events") or []
+    except Exception:
+        return []
+    out = []
+    for ev in events:
+        ev_id = ev.get("id")
+        if not ev_id:
+            continue
+        try:
+            sr = requests.get(
+                f"https://site.api.espn.com/apis/site/v2/sports/{path}/summary"
+                f"?event={ev_id}",
+                timeout=8,
+            )
+            if sr.status_code != 200:
+                continue
+            box = (sr.json() or {}).get("boxscore") or {}
+            for team in box.get("players") or []:
+                team_name = (team.get("team") or {}).get("displayName") or ""
+                for stat_block in team.get("statistics") or []:
+                    keys = [
+                        (k or "").lower()
+                        for k in (stat_block.get("keys") or [])
+                    ]
+                    for ath in stat_block.get("athletes") or []:
+                        a = ath.get("athlete") or {}
+                        name = a.get("displayName") or ""
+                        vals = ath.get("stats") or []
+                        stats = {}
+                        for k, v in zip(keys, vals):
+                            try:
+                                stats[k] = float(str(v).split("-")[0])
+                            except Exception:
+                                continue
+                        if name and stats:
+                            out.append(
+                                {"player": name, "team": team_name, "stats": stats}
+                            )
+        except Exception:
+            continue
+    return out
+
+
+_PROP_STAT_ALIASES = {
+    "points": ["points", "pts"],
+    "pts": ["points", "pts"],
+    "rebounds": ["rebounds", "reb", "totreb"],
+    "reb": ["rebounds", "reb", "totreb"],
+    "assists": ["assists", "ast"],
+    "ast": ["assists", "ast"],
+    "threes": ["3pm", "threepointfieldgoalsmade", "3ptm"],
+    "3pm": ["3pm", "threepointfieldgoalsmade"],
+    "steals": ["steals", "stl"],
+    "blocks": ["blocks", "blk"],
+    "pra": ["pra"],
+    "passing yards": ["passingyards", "passyds"],
+    "rushing yards": ["rushingyards", "rushyds"],
+    "receiving yards": ["receivingyards", "recyds"],
+    "receptions": ["receptions", "rec"],
+    "passing tds": ["passingtouchdowns", "passtd"],
+    "hits": ["hits", "h"],
+    "strikeouts": ["strikeouts", "k", "so"],
+    "shots": ["shots", "sog", "shotsongoal"],
+    "goals": ["goals", "g"],
+}
+
+
+def _stat_value(stats, label):
+    label_low = (label or "").lower().strip()
+    aliases = _PROP_STAT_ALIASES.get(label_low, [label_low.replace(" ", "")])
+    for a in aliases:
+        if a in stats:
+            return stats[a]
+    for k, v in stats.items():
+        if any(a in k for a in aliases):
+            return v
+    return None
+
+
+def _grade_prop(desc, all_box):
+    """Parse 'Player Name OVER 24.5 points' style and return won/lost/push/None."""
+    if not desc:
+        return None
+    txt = " ".join(str(desc).split())
+    low = txt.lower()
+    side = None
+    if " over " in low or low.startswith("over "):
+        side = "over"
+    elif " under " in low or low.startswith("under "):
+        side = "under"
+    else:
+        return None
+    parts = low.split(f" {side} ", 1) if f" {side} " in low else low.split(side + " ", 1)
+    if len(parts) != 2:
+        return None
+    name_raw = parts[0].strip(" :-")
+    rest = parts[1].strip()
+    tok = rest.split()
+    if not tok:
+        return None
+    try:
+        line = float(tok[0])
+    except Exception:
+        return None
+    stat = " ".join(tok[1:]).strip(" .,;:")
+    if not stat:
+        return None
+    name_norm = name_raw.lower()
+    best = None
+    for row in all_box:
+        pn = (row.get("player") or "").lower()
+        if not pn:
+            continue
+        if name_norm in pn or pn in name_norm or all(
+            w in pn for w in name_norm.split() if len(w) > 2
+        ):
+            v = _stat_value(row.get("stats") or {}, stat)
+            if v is not None:
+                best = v
+                break
+    if best is None:
+        return None
+    if abs(best - line) < 1e-6:
+        return "push"
+    if side == "over":
+        return "won" if best > line else "lost"
+    return "won" if best < line else "lost"
+
+
+def auto_grade_prop_bets(open_bets, active_leagues):
+    graded = {"won": 0, "lost": 0, "push": 0, "skipped": 0, "total": 0}
+    box_by_lg_date = {}
+    for b in open_bets:
+        graded["total"] += 1
+        date = b.get("date")
+        if not date:
+            graded["skipped"] += 1
+            continue
+        result = None
+        for lg in active_leagues:
+            key = (lg, date)
+            if key not in box_by_lg_date:
+                box_by_lg_date[key] = fetch_player_boxscore(lg, date)
+            box = box_by_lg_date[key]
+            if not box:
+                continue
+            result = _grade_prop(b.get("description"), box)
+            if result:
+                break
+        if result:
+            db_settle_bet(b["id"], result)
+            graded[result] += 1
+        else:
+            graded["skipped"] += 1
+    return graded
+
+
 def american_to_decimal(american):
     a = float(american)
     return 1.0 + (a / 100.0 if a > 0 else 100.0 / abs(a))
@@ -1889,6 +2107,74 @@ CSS = (
 )
 st.markdown(CSS, unsafe_allow_html=True)
 
+st.markdown(
+    """
+<style>
+.edge-card-hover {
+  transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,.06);
+  padding: 10px 12px;
+}
+.edge-card-hover:hover {
+  transform: translateY(-3px) scale(1.012);
+  box-shadow: 0 14px 40px rgba(0,0,0,.55), 0 0 22px rgba(220,38,38,.18);
+  border-color: rgba(220,38,38,.45);
+}
+.edge-scorestrip {
+  display:flex; gap:10px; overflow-x:auto; padding:8px 2px 14px;
+  scrollbar-width: thin;
+}
+.edge-score-card {
+  flex: 0 0 auto;
+  min-width: 180px;
+  background: linear-gradient(180deg, rgba(220,38,38,.10), rgba(0,0,0,.20));
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: .82rem;
+}
+.edge-score-card .lg { color:#9CA3AF; font-size:.7rem; letter-spacing:.08em; text-transform:uppercase; }
+.edge-score-card .row { display:flex; justify-content:space-between; padding:1px 0; }
+.edge-score-card .row .sc { font-weight:700; font-variant-numeric:tabular-nums; }
+.edge-score-card .st { color:#F59E0B; font-size:.7rem; margin-top:3px; }
+.edge-score-card.live { border-color: rgba(16,185,129,.55); }
+.edge-score-card.live .st { color:#10B981; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# ---------------- Multi-user PIN gate ----------------
+if not st.session_state.get("edge_user"):
+    sp = st.empty()
+    with sp.container():
+        st.markdown("## Edge - Sign in")
+        st.caption(
+            "Enter a username and 4+ digit PIN. Your bets, badges and notes are "
+            "stored under this user. Use the same combo to log back in."
+        )
+        cu1, cu2 = st.columns(2)
+        u_name = cu1.text_input("Username", key="pin_user_input", max_chars=24)
+        u_pin = cu2.text_input(
+            "PIN", key="pin_pin_input", type="password", max_chars=12,
+        )
+        cb1, cb2 = st.columns([1, 3])
+        if cb1.button("Sign in", type="primary", use_container_width=True):
+            uname = (u_name or "").strip().lower()
+            if not uname or len(u_pin or "") < 4:
+                st.error("Need a username and 4+ digit PIN.")
+                st.stop()
+            uid = f"{uname}-{_user_pin_hash(u_pin)}"
+            st.session_state["edge_user"] = uid
+            st.session_state["edge_user_label"] = uname
+            st.rerun()
+        cb2.caption(
+            "Tip: PINs are hashed before being used as a key suffix. Pick "
+            "something only you know - lose the PIN, lose access to that book."
+        )
+    st.stop()
+
 if not st.session_state.get("splash_shown"):
     st.session_state["splash_shown"] = True
     st.markdown(
@@ -1900,6 +2186,17 @@ if not st.session_state.get("splash_shown"):
     )
 
 with st.sidebar:
+    _ulabel = st.session_state.get("edge_user_label", "default")
+    st.markdown(
+        f"<div style='font-size:.78rem;color:#9CA3AF;margin-bottom:4px'>"
+        f"Signed in as <b style='color:#F3F4F6'>{_ulabel}</b></div>",
+        unsafe_allow_html=True,
+    )
+    if st.button("Sign out", key="signout_btn", use_container_width=True):
+        for _k in ("edge_user", "edge_user_label", "splash_shown"):
+            st.session_state.pop(_k, None)
+        st.rerun()
+    st.markdown("---")
     st.markdown("### Bankroll")
     bankroll = st.number_input("Bankroll ($)", min_value=10.0, value=500.0, step=10.0)
     min_bet = st.number_input("Min bet ($)", min_value=1.0, value=1.0, step=1.0)
@@ -2673,6 +2970,43 @@ with tab_parlay:
 
 with tab_board:
     league_id = st.selectbox("League", [lg["id"] for lg in LEAGUES], index=0)
+
+    # ---- Live scoreboard strip (#33) ----
+    try:
+        _today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        _live = fetch_finals(league_id, _today_iso) or []
+    except Exception:
+        _live = []
+    if _live:
+        _cards = []
+        for _g in _live[:24]:
+            try:
+                _away = str(_g.get("away") or "AWAY")[:14]
+                _home = str(_g.get("home") or "HOME")[:14]
+                _as = _g.get("away_score")
+                _hs = _g.get("home_score")
+                _stt = (_g.get("status") or "").upper()
+                _live_cls = "live" if any(
+                    k in _stt for k in ("IN", "LIVE", "Q", "HALF", "PROGRESS")
+                ) else ""
+                _cards.append(
+                    f"<div class='edge-score-card {_live_cls}'>"
+                    f"<div class='lg'>{league_id}</div>"
+                    f"<div class='row'><span>{_away}</span>"
+                    f"<span class='sc'>{_as if _as is not None else '-'}</span></div>"
+                    f"<div class='row'><span>{_home}</span>"
+                    f"<span class='sc'>{_hs if _hs is not None else '-'}</span></div>"
+                    f"<div class='st'>{_stt or 'SCHEDULED'}</div>"
+                    f"</div>"
+                )
+            except Exception:
+                continue
+        if _cards:
+            st.markdown(
+                "<div class='edge-scorestrip'>" + "".join(_cards) + "</div>",
+                unsafe_allow_html=True,
+            )
+
     events, warn = get_board(league_id, books_filter)
     if warn:
         st.warning(warn)
@@ -3052,16 +3386,16 @@ with tab_bank:
             st.rerun()
 
     st.subheader("Auto-grade open bets")
-    ag_l, ag_r = st.columns([3, 1])
+    ag_l, ag_r1, ag_r2 = st.columns([3, 1, 1])
     with ag_l:
         st.caption(
-            "Pulls final scores from ESPN and settles open bets that match a "
-            "team and date (moneylines, spreads, totals). Player props won't "
-            "be auto-graded - settle those manually below."
+            "Team grader pulls final scores from ESPN for moneylines / spreads "
+            "/ totals. Prop grader pulls player box scores and reads "
+            "'Name OVER/UNDER 24.5 points' style descriptions."
         )
-    with ag_r:
+    with ag_r1:
         if st.button(
-            "Grade now", use_container_width=True, type="primary",
+            "Grade teams", use_container_width=True, type="primary",
             key="auto_grade_btn",
         ):
             open_bets_for_grade = [b for b in bets if b["status"] == "open"]
@@ -3075,6 +3409,25 @@ with tab_bank:
                 st.success(
                     f"Graded {res['won'] + res['lost'] + res['push']} of "
                     f"{res['total']} - won {res['won']}, lost {res['lost']}, "
+                    f"push {res['push']}, skipped {res['skipped']}."
+                )
+                st.rerun()
+    with ag_r2:
+        if st.button(
+            "Grade props", use_container_width=True,
+            key="auto_grade_prop_btn",
+        ):
+            open_bets_for_grade = [b for b in bets if b["status"] == "open"]
+            if not open_bets_for_grade:
+                st.info("No open bets to grade.")
+            else:
+                with st.spinner("Pulling player box scores..."):
+                    res = auto_grade_prop_bets(
+                        open_bets_for_grade, leagues_filter,
+                    )
+                st.success(
+                    f"Props: graded {res['won'] + res['lost'] + res['push']} "
+                    f"of {res['total']} - won {res['won']}, lost {res['lost']}, "
                     f"push {res['push']}, skipped {res['skipped']}."
                 )
                 st.rerun()
