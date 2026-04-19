@@ -107,10 +107,12 @@ BG = "#0B1220"
 PANEL = "#121A2B"
 HALO = "#15203a"
 THEMES = {
-    "Bloomberg":   {"bg": "#0B1220", "panel": "#121A2B", "accent": "#9E1B32", "halo": "#15203a"},
-    "Vegas Gold":  {"bg": "#1A0420", "panel": "#2A0F30", "accent": "#FFD700", "halo": "#3E1450"},
-    "Matrix":      {"bg": "#000000", "panel": "#0A1A0A", "accent": "#00FF41", "halo": "#0F2A14"},
-    "Miami Sunset":{"bg": "#0E1B3A", "panel": "#1A2C4A", "accent": "#FF2E93", "halo": "#1F3A6E"},
+    "Bloomberg":         {"bg": "#0B1220", "panel": "#121A2B", "accent": "#9E1B32", "halo": "#15203a"},
+    "Alabama Crimson Tide": {"bg": "#160305", "panel": "#26090E", "accent": "#9E1B32", "halo": "#4A0D18"},
+    "Tennessee Volunteers": {"bg": "#180C00", "panel": "#27160A", "accent": "#FF8200", "halo": "#4A2300"},
+    "Vegas Gold":        {"bg": "#1A0420", "panel": "#2A0F30", "accent": "#FFD700", "halo": "#3E1450"},
+    "Matrix":            {"bg": "#000000", "panel": "#0A1A0A", "accent": "#00FF41", "halo": "#0F2A14"},
+    "Miami Sunset":      {"bg": "#0E1B3A", "panel": "#1A2C4A", "accent": "#FF2E93", "halo": "#1F3A6E"},
 }
 GREEN = "#22C55E"
 AMBER = "#F59E0B"
@@ -2446,6 +2448,106 @@ CSS = (
        .replace("__RED__", RED)
 )
 st.markdown(CSS, unsafe_allow_html=True)
+
+# ---- Team theme override (recolor hard-coded reds across all components) ----
+def _hex_to_rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+if _theme_name in ("Alabama Crimson Tide", "Tennessee Volunteers"):
+    _ac = _theme["accent"]
+    _ar, _ag, _ab = _hex_to_rgb(_ac)
+    _rgb = f"{_ar},{_ag},{_ab}"
+    st.markdown(
+        f"""
+<style>
+/* Re-skin hard-coded crimson surfaces to match team accent */
+.edge-fight-card {{
+  border-color: {_ac} !important;
+  background:
+    radial-gradient(circle at 50% 0%, rgba({_rgb},.28), rgba(0,0,0,0) 60%),
+    linear-gradient(180deg, rgba({_rgb},.10), #0a0a0a) !important;
+  box-shadow:
+    0 0 40px rgba({_rgb},.18) inset,
+    0 12px 30px rgba(0,0,0,.5) !important;
+}}
+.edge-fight-banner {{ background: {_ac} !important; }}
+.edge-fight-vs    {{ color: {_ac} !important;
+                    text-shadow: 0 0 18px rgba({_rgb},.6) !important; }}
+.edge-ticker {{
+  border-top-color: rgba({_rgb},.4) !important;
+  border-bottom-color: rgba({_rgb},.4) !important;
+  box-shadow: 0 0 30px rgba({_rgb},.18) !important;
+}}
+.edge-ticker-item .sep {{ color: {_ac} !important; }}
+.edge-card-hover:hover {{
+  box-shadow: 0 14px 40px rgba(0,0,0,.55), 0 0 22px rgba({_rgb},.22) !important;
+  border-color: rgba({_rgb},.45) !important;
+}}
+.edge-score-card {{
+  background: linear-gradient(180deg, rgba({_rgb},.10), rgba(0,0,0,.20)) !important;
+}}
+.edge-pace.slow         {{ color: {_ac} !important;
+                           border-color: rgba({_rgb},.4) !important; }}
+.edge-ump .tilt-under   {{ color: {_ac} !important; }}
+.edge-pga td.score-up   {{ color: {_ac} !important; }}
+.edge-mobar-cell .v.red {{ color: {_ac} !important; }}
+#edge-music-btn         {{ border-color: rgba({_rgb},.4) !important; }}
+#edge-music-btn.on      {{ background: {_ac} !important;
+                           border-color: {_ac} !important;
+                           box-shadow: 0 0 14px rgba({_rgb},.45) !important; }}
+.book-link, .edge-pill, .edge-badge,
+.stTabs [aria-selected="true"] {{
+  /* tab + chip accent */
+}}
+.stTabs [aria-selected="true"] {{
+  color: {_ac} !important;
+  border-bottom-color: {_ac} !important;
+}}
+button[kind="primary"] {{
+  background-color: {_ac} !important;
+  border-color: {_ac} !important;
+}}
+/* Splash fog tint */
+#edge-splash::before {{
+  background:
+    radial-gradient(closest-side at 25% 35%, rgba({_rgb},.20), transparent 60%),
+    radial-gradient(closest-side at 70% 60%, rgba(255,255,255,.08), transparent 65%),
+    radial-gradient(closest-side at 50% 80%, rgba({_rgb},.14), transparent 70%),
+    radial-gradient(closest-side at 80% 20%, rgba(255,255,255,.06), transparent 60%) !important;
+}}
+#edge-splash::after {{
+  background:
+    radial-gradient(closest-side at 60% 25%, rgba(255,255,255,.06), transparent 55%),
+    radial-gradient(closest-side at 30% 70%, rgba({_rgb},.12), transparent 60%),
+    radial-gradient(closest-side at 75% 75%, rgba(255,255,255,.05), transparent 60%) !important;
+}}
+/* Tour modal accent */
+#edge-tour-ov + * {{}}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+    # Team mascot ribbon under the title
+    _mascot = (
+        "ROLL TIDE - HOUNDSTOOTH SHARP - 18-TIME NATIONAL CHAMPS"
+        if _theme_name == "Alabama Crimson Tide"
+        else "ROCKY TOP - VOL NAVY - GO BIG ORANGE"
+    )
+    st.markdown(
+        f"""
+<div style="
+  text-align:center; padding:6px 12px; margin:-6px 0 10px;
+  background: linear-gradient(90deg, transparent, rgba({_rgb},.18), transparent);
+  border-top: 1px solid rgba({_rgb},.35);
+  border-bottom: 1px solid rgba({_rgb},.35);
+  font-family: 'Bebas Neue','Oswald',sans-serif;
+  letter-spacing: .25em; font-size: .82rem; color:{_ac};
+  text-shadow: 0 0 10px rgba({_rgb},.5);
+">{_mascot}</div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 st.markdown(
     """
