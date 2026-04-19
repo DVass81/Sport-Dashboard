@@ -1220,6 +1220,20 @@ def safe_plotly_chart(fig, name, use_container_width=True):
     unique_key = f"{name}_{st.session_state['_plotly_render_nonce']}"
     st.plotly_chart(fig, use_container_width=use_container_width, key=unique_key)
 
+
+def safe_dataframe(data, name, use_container_width=True, hide_index=True, column_config=None):
+    if "_dataframe_render_nonce" not in st.session_state:
+        st.session_state["_dataframe_render_nonce"] = defaultdict(int)
+    st.session_state["_dataframe_render_nonce"][name] += 1
+    unique_key = f"{name}_{st.session_state['_dataframe_render_nonce'][name]}"
+    st.dataframe(
+        data,
+        use_container_width=use_container_width,
+        hide_index=hide_index,
+        column_config=column_config,
+        key=unique_key,
+    )
+
 def plot_bankroll_curve(settled_df, starting_bankroll):
     if settled_df.empty:
         return None
@@ -2198,8 +2212,9 @@ with tabs[1]:
             "Link",
         ]
     ]
-    st.dataframe(
+    safe_dataframe(
         display_df,
+        "best_bets_table",
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -2295,7 +2310,7 @@ with tabs[2]:
         unsafe_allow_html=True,
     )
 
-    st.dataframe(
+    safe_dataframe(
         compare_df[
             [
                 "Sport",
@@ -2325,6 +2340,7 @@ with tabs[2]:
                 "Best Link",
             ]
         ],
+        "compare_lines_table",
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -2410,7 +2426,7 @@ def render_book_tab(book_name):
         st.warning(f"No rows currently available for {book_name}.")
         return
 
-    st.dataframe(
+    safe_dataframe(
         book_df[
             [
                 "Sport",
@@ -2432,6 +2448,7 @@ def render_book_tab(book_name):
                 "Link",
             ]
         ],
+        f"book_table_{book_name.lower()}",
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -2590,7 +2607,7 @@ with tabs[9]:
             )
 
             with st.form("log_bet_form"):
-                selected_log_label = st.selectbox("Choose a final bet", options=log_candidates["Log Label"].tolist())
+                selected_log_label = st.selectbox("Choose a final bet", options=log_candidates["Log Label"].tolist(), key="tracker_log_select")
                 submitted_log = st.form_submit_button("Log Selected Bet")
                 if submitted_log:
                     selected_row = log_candidates.loc[log_candidates["Log Label"] == selected_log_label].iloc[0]
@@ -2624,8 +2641,8 @@ with tabs[9]:
             )
 
             with st.form("settle_bet_form"):
-                selected_settle_label = st.selectbox("Choose a pending bet", options=pending_now["Settle Label"].tolist())
-                settle_result = st.radio("Result", ["Win", "Loss", "Push"], horizontal=True)
+                selected_settle_label = st.selectbox("Choose a pending bet", options=pending_now["Settle Label"].tolist(), key="tracker_settle_select")
+                settle_result = st.radio("Result", ["Win", "Loss", "Push"], horizontal=True, key="tracker_settle_result")
                 submitted_settle = st.form_submit_button("Settle Bet")
                 if submitted_settle:
                     selected_bet_id = selected_settle_label.split(" | ")[0]
@@ -2643,7 +2660,7 @@ with tabs[9]:
     if pending_view.empty:
         st.info("No pending bets currently logged.")
     else:
-        st.dataframe(
+        safe_dataframe(
             pending_view[
                 [
                     "Bet ID",
@@ -2661,6 +2678,7 @@ with tabs[9]:
                     "Reason",
                 ]
             ],
+            "pending_bet_log_table",
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -2700,7 +2718,7 @@ with tabs[10]:
                 safe_plotly_chart(fig, "results_observed_clv")
 
         st.markdown("#### Settled Bet History")
-        st.dataframe(
+        safe_dataframe(
             settled_log[
                 [
                     "Bet ID",
@@ -2720,6 +2738,7 @@ with tabs[10]:
                     "CLV Label",
                 ]
             ].sort_values("Settled At", ascending=False),
+            "settled_bet_history_table",
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -2780,7 +2799,7 @@ with tabs[11]:
 
         if not pass_bets_live.empty:
             st.markdown("#### Why the app passed on some bets")
-            st.dataframe(
+            safe_dataframe(
                 pass_bets_live[
                     [
                         "Event",
@@ -2793,6 +2812,7 @@ with tabs[11]:
                         "Correlation Flag",
                     ]
                 ].head(20),
+                "pass_bets_table",
                 use_container_width=True,
                 hide_index=True,
                 column_config={
