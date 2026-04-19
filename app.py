@@ -18,6 +18,12 @@ TARGET_BOOKS = {
     "prizepicks": "PrizePicks",
 }
 DEFAULT_LEAGUES = ["NBA", "NFL", "MLB", "NHL"]
+BOOK_URLS = {
+    "DraftKings": "https://sportsbook.draftkings.com/",
+    "FanDuel": "https://sportsbook.fanduel.com/",
+    "Bet365": "https://www.bet365.com/",
+    "PrizePicks": "https://app.prizepicks.com/",
+}
 MAIN_MARKETS = {"Moneyline", "Spread", "Total"}
 PROP_MARKETS = {"Player Prop", "DFS Prop", "Team Total"}
 
@@ -172,6 +178,127 @@ def market_sort_value(bucket):
         "Other": 7,
     }
     return order.get(bucket, 8)
+
+
+def make_badge_html(text, variant):
+    return f'<span class="badge badge-{variant}">{text}</span>'
+
+
+def confidence_badge_text(value):
+    mapping = {
+        "Elite": "🔵 Elite",
+        "High": "🟢 High",
+        "Medium": "🟡 Medium",
+        "Low": "⚪ Low",
+    }
+    return mapping.get(value, str(value))
+
+
+def move_badge_text(value):
+    mapping = {
+        "Improving": "📈 Improving",
+        "Flat": "➖ Flat",
+        "Worse": "📉 Worse",
+        "New": "🆕 New",
+    }
+    return mapping.get(value, str(value))
+
+
+def decision_badge_text(value):
+    mapping = {
+        "Within Limits": "✅ Within Limits",
+        "Trimmed": "✂️ Trimmed",
+        "Correlation Pass": "🚫 Correlation Pass",
+        "Exposure Pass": "⛔ Exposure Pass",
+        "Below Threshold": "⚪ Below Threshold",
+        "Pending Review": "🕒 Pending Review",
+    }
+    return mapping.get(value, str(value))
+
+
+def build_badges_html(row):
+    conf_map = {"Elite": "elite", "High": "high", "Medium": "medium", "Low": "low"}
+    move_map = {"Improving": "improving", "Flat": "flat", "Worse": "worse", "New": "new"}
+    decision_value = row.get("Allocation Status", "")
+    decision_map = {
+        "Within Limits": "within",
+        "Trimmed": "trimmed",
+        "Correlation Pass": "blocked",
+        "Exposure Pass": "blocked",
+        "Below Threshold": "low",
+        "Pending Review": "flat",
+    }
+    pieces = [
+        make_badge_html(str(row.get("Confidence", "")), conf_map.get(row.get("Confidence", ""), "flat")),
+        make_badge_html(str(row.get("Move Label", "")), move_map.get(row.get("Move Label", ""), "flat")),
+        make_badge_html(str(decision_value), decision_map.get(decision_value, "flat")),
+    ]
+    return "".join(pieces)
+
+
+def watchlist_match(row, query):
+    if not query:
+        return False
+    q = str(query).strip().lower()
+    if not q:
+        return False
+    haystack = " ".join([
+        str(row.get("Event", "")),
+        str(row.get("Pick", "")),
+        str(row.get("Market", "")),
+        str(row.get("Sportsbook", "")),
+        str(row.get("Sport", "")),
+    ]).lower()
+    return q in haystack
+
+
+def render_quick_links():
+    st.markdown('<div class="section-title">Quick Sportsbook Links</div>', unsafe_allow_html=True)
+    cols = st.columns(4)
+    books = [
+        ("DraftKings", "🟩"),
+        ("FanDuel", "🟦"),
+        ("Bet365", "🟢"),
+        ("PrizePicks", "🟧"),
+    ]
+    for col, (book, icon) in zip(cols, books):
+        with col:
+            st.markdown(
+                f"""
+                <div class="book-link-card">
+                    <div class="book-link-title">{icon} {book}</div>
+                    <div class="book-link-sub">Open the sportsbook site fast</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            try:
+                st.link_button(f"Open {book}", BOOK_URLS[book], use_container_width=True)
+            except Exception:
+                st.markdown(f"[Open {book}]({BOOK_URLS[book]})")
+
+
+def build_explain_bet_markdown(row, compare_df=None):
+    notes = []
+    notes.append(f"**Why the board likes it:** {row.get('Reason', 'No base reason provided.')}")
+    notes.append(f"**Current price:** {row.get('Sportsbook', 'Book')} {row.get('Odds', '')} with implied probability {row.get('Implied Prob', 0):.2f}%.")
+    notes.append(f"**Model vs market:** model probability {row.get('Model Prob', 0):.2f}% vs edge {row.get('Edge %', 0):.2f}%.")
+    notes.append(f"**Score + sizing:** bet score {row.get('Bet Score', 0):.2f}, recommended ${int(row.get('Recommended Bet', 0))}, final allocation ${int(row.get('Final Bet', 0))}.")
+    notes.append(f"**Line movement:** previous odds {row.get('Prev Odds', '—')} to current {row.get('Odds', '')}, labeled {row.get('Move Label', 'Flat')} ({row.get('Line Move %', 0):+.2f}%).")
+    notes.append(f"**Risk controls:** {row.get('Allocation Status', '—')}. {row.get('Pass Reason', '') or 'No extra pass note; the play fits the current controls.'}")
+    if compare_df is not None and not compare_df.empty:
+        same = compare_df[
+            (compare_df["Event"] == row.get("Event"))
+            & (compare_df["Pick"] == row.get("Pick"))
+            & (compare_df["Market"] == row.get("Market"))
+        ]
+        if not same.empty:
+            comp = same.iloc[0]
+            notes.append(
+                f"**Best-book context:** best book is {comp.get('Best Sportsbook', '—')} at {comp.get('Best Odds', '—')} with a line gap of {comp.get('Line Gap %', 0):.2f}% across {int(comp.get('Books_Quoting', 0) or 0)} books."
+            )
+    return "\n\n".join(notes)
+
 
 
 # -----------------------------
@@ -766,6 +893,8 @@ max_event_exposure = st.sidebar.number_input("Max Exposure per Event", min_value
 max_book_exposure = st.sidebar.number_input("Max Exposure per Sportsbook", min_value=1.0, value=12.0, step=1.0)
 max_prop_exposure = st.sidebar.number_input("Max Exposure on Props", min_value=1.0, value=8.0, step=1.0)
 correlation_guard = st.sidebar.toggle("Correlation Protection", value=True)
+watchlist_query = st.sidebar.text_input("Watchlist filter", placeholder="Knicks, LeBron, totals, Braves...")
+watchlist_only = st.sidebar.toggle("Show watchlist matches only", value=False)
 only_final_bets = st.sidebar.toggle("Show final bets only", value=False)
 
 if st.sidebar.button("Refresh now"):
@@ -778,6 +907,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+render_quick_links()
 
 # -----------------------------
 # LIVE DASHBOARD
@@ -810,6 +940,12 @@ def render_live_dashboard():
         use_correlation_guard=correlation_guard,
     )
 
+    filtered_df["Watchlist Match"] = filtered_df.apply(lambda row: watchlist_match(row, watchlist_query), axis=1)
+    filtered_df["Watchlist Label"] = filtered_df["Watchlist Match"].map({True: "⭐ Watchlist", False: ""})
+
+    if watchlist_only and str(watchlist_query).strip():
+        filtered_df = filtered_df[filtered_df["Watchlist Match"]].copy()
+
     if only_final_bets:
         filtered_df = filtered_df[filtered_df["Final Status"] == "Bet"].copy()
 
@@ -831,6 +967,7 @@ def render_live_dashboard():
     strong_alerts = strong_shop_alerts(live_bets)
     avg_books = float(live_bets["Books Quoting"].mean()) if not live_bets.empty else 0.0
     improving_count = int((live_bets["Move Label"] == "Improving").sum()) if not live_bets.empty else 0
+    watchlist_hits = int(filtered_df["Watchlist Match"].sum()) if "Watchlist Match" in filtered_df.columns else 0
 
     exposure_by_sport = live_bets.groupby("Sport")["Final Bet"].sum().sort_values(ascending=False) if not live_bets.empty else pd.Series(dtype=float)
     exposure_by_book = live_bets.groupby("Sportsbook")["Final Bet"].sum().sort_values(ascending=False) if not live_bets.empty else pd.Series(dtype=float)
@@ -841,11 +978,7 @@ def render_live_dashboard():
     with hero_left:
         st.markdown("### Current Top Bet")
         if best_row is not None:
-            pills = "".join([
-                f'<span class="pill">{best_row["Confidence"]}</span>',
-                f'<span class="pill">{best_row["Move Label"]}</span>',
-                f'<span class="pill">{best_row["Allocation Status"]}</span>',
-            ])
+            pills = build_badges_html(best_row)
             st.markdown(
                 f"""
                 **{best_row['Pick']}**  
@@ -895,7 +1028,7 @@ def render_live_dashboard():
     with k7:
         kpi_card("Improving Lines", improving_count)
     with k8:
-        kpi_card("Avg Books", f"{avg_books:.1f}")
+        kpi_card("Watchlist Hits", watchlist_hits)
 
     tabs = st.tabs([
         "Home",
@@ -926,7 +1059,8 @@ def render_live_dashboard():
                             Book: <b>{row['Sportsbook']}</b> · Odds: <b>{row['Odds']}</b> · Prev: <b>{row['Prev Odds']}</b><br>
                             Edge: <b>{row['Edge %']:.2f}%</b> · Score: <b>{row['Bet Score']:.2f}</b> · Confidence: <b>{row['Confidence']}</b><br>
                             Final Bet: <b>${int(row['Final Bet'])}</b> · Move: <b>{row['Line Move %']:+.2f}% ({row['Move Label']})</b><br>
-                            Decision: <b>{row['Allocation Status']}</b><br>
+                            Decision: <b>{row['Allocation Status']}</b> {row['Watchlist Label']}<br>
+                            {build_badges_html(row)}<br>
                             Reason: <i>{row['Pass Reason'] or row['Reason']}</i>
                             {link_html}
                         </div>
@@ -943,7 +1077,8 @@ def render_live_dashboard():
                 • <b>Correlation protection</b> is <b>{'On' if correlation_guard else 'Off'}</b>.<br>
                 • <b>Total exposure cap</b> is <b>${max_total_exposure:.0f}</b>.<br>
                 • <b>Sport / event / book / prop caps</b> trim or pass lower-ranked bets.<br>
-                • Bets tagged <b>Improving</b> have moved toward a better number for you since the last refresh.
+                • Bets tagged <b>Improving</b> have moved toward a better number for you since the last refresh.<br>
+                • <b>Watchlist filter</b> is {'active' if str(watchlist_query).strip() else 'off'} and currently flags <b>{watchlist_hits}</b> rows.
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1028,6 +1163,9 @@ def render_live_dashboard():
         display_df = filtered_df.copy()
         display_df["Link"] = display_df["Link"].apply(make_link_markdown)
         display_df["Minutes To Start"] = display_df["Minutes To Start"].apply(format_minutes)
+        display_df["Confidence Tag"] = display_df["Confidence"].apply(confidence_badge_text)
+        display_df["Move Tag"] = display_df["Move Label"].apply(move_badge_text)
+        display_df["Decision Tag"] = display_df["Allocation Status"].apply(decision_badge_text)
         display_df = display_df[
             [
                 "Sport",
@@ -1038,6 +1176,10 @@ def render_live_dashboard():
                 "Sportsbook",
                 "Prev Odds",
                 "Odds",
+                "Watchlist Label",
+                "Confidence Tag",
+                "Move Tag",
+                "Decision Tag",
                 "Move Label",
                 "Line Move %",
                 "Implied Prob",
@@ -1077,6 +1219,33 @@ def render_live_dashboard():
                 "Link": st.column_config.LinkColumn("Open"),
             },
         )
+
+        st.markdown('<div class="section-title">Explain This Bet</div>', unsafe_allow_html=True)
+        explain_candidates = filtered_df[filtered_df["Final Status"] == "Bet"].copy()
+        if explain_candidates.empty:
+            st.info("No final bets available to explain right now.")
+        else:
+            explain_candidates["Explain Label"] = explain_candidates.apply(
+                lambda row: f"{row['Event']} | {row['Pick']} | {row['Sportsbook']} {row['Odds']} | ${int(row['Final Bet'])}",
+                axis=1,
+            )
+            selected_label = st.selectbox(
+                "Choose a final bet to explain",
+                options=explain_candidates["Explain Label"].tolist(),
+                key="explain_bet_select",
+            )
+            explained_row = explain_candidates.loc[explain_candidates["Explain Label"] == selected_label].iloc[0]
+            st.markdown(
+                f"""
+                <div class="card">
+                <b>{explained_row['Pick']}</b><br>
+                {explained_row['Event']} · {explained_row['Market']}<br>
+                {build_badges_html(explained_row)}<br>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.markdown(build_explain_bet_markdown(explained_row), unsafe_allow_html=False)
 
     def sportsbook_section(book_name):
         book_df = filtered_df[filtered_df["Sportsbook"] == book_name].copy()
@@ -1121,6 +1290,9 @@ def render_live_dashboard():
 
         book_df["Link"] = book_df["Link"].apply(make_link_markdown)
         book_df["Minutes To Start"] = book_df["Minutes To Start"].apply(format_minutes)
+        book_df["Confidence Tag"] = book_df["Confidence"].apply(confidence_badge_text)
+        book_df["Move Tag"] = book_df["Move Label"].apply(move_badge_text)
+        book_df["Decision Tag"] = book_df["Allocation Status"].apply(decision_badge_text)
         book_df = book_df[
             [
                 "Sport",
@@ -1130,6 +1302,10 @@ def render_live_dashboard():
                 "Pick",
                 "Prev Odds",
                 "Odds",
+                "Watchlist Label",
+                "Confidence Tag",
+                "Move Tag",
+                "Decision Tag",
                 "Move Label",
                 "Line Move %",
                 "Edge %",
