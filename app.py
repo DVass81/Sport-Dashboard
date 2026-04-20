@@ -3029,6 +3029,28 @@ b[style*="#10B981"] {
 )
 
 # ---------------- Multi-user PIN gate ----------------
+# Rehydrate from query param (seeded by localStorage on the device)
+if not st.session_state.get("edge_user"):
+    try:
+        _qp_login = st.query_params
+        _seed_uid = _qp_login.get("edge_uid_seed")
+        _seed_lbl = _qp_login.get("edge_uid_label")
+        if isinstance(_seed_uid, list):
+            _seed_uid = _seed_uid[0] if _seed_uid else None
+        if isinstance(_seed_lbl, list):
+            _seed_lbl = _seed_lbl[0] if _seed_lbl else None
+        if _seed_uid:
+            st.session_state["edge_user"] = _seed_uid
+            st.session_state["edge_user_label"] = _seed_lbl or _seed_uid
+            try:
+                del st.query_params["edge_uid_seed"]
+                if "edge_uid_label" in st.query_params:
+                    del st.query_params["edge_uid_label"]
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 if not st.session_state.get("edge_user"):
     sp = st.empty()
     with sp.container():
@@ -3042,6 +3064,9 @@ if not st.session_state.get("edge_user"):
         u_pin = cu2.text_input(
             "PIN", key="pin_pin_input", type="password", max_chars=12,
         )
+        _remember = st.checkbox(
+            "Remember me on this device", value=True, key="pin_remember",
+        )
         cb1, cb2 = st.columns([1, 3])
         if cb1.button("Sign in", type="primary", use_container_width=True):
             uname = (u_name or "").strip().lower()
@@ -3051,10 +3076,45 @@ if not st.session_state.get("edge_user"):
             uid = f"{uname}-{_user_pin_hash(u_pin)}"
             st.session_state["edge_user"] = uid
             st.session_state["edge_user_label"] = uname
+            if _remember:
+                _safe_uid = uid.replace("'", "").replace('"', "")
+                _safe_lbl = uname.replace("'", "").replace('"', "")
+                st.components.v1.html(
+                    f"""
+<script>
+try {{
+  localStorage.setItem('edge_uid', '{_safe_uid}');
+  localStorage.setItem('edge_uid_label', '{_safe_lbl}');
+}} catch(e) {{}}
+</script>
+""",
+                    height=0,
+                )
             st.rerun()
         cb2.caption(
             "Tip: PINs are hashed before being used as a key suffix. Pick "
             "something only you know - lose the PIN, lose access to that book."
+        )
+        # Seed query params from localStorage on first load so we can
+        # auto-sign-in on the next rerun without retyping.
+        st.components.v1.html(
+            """
+<script>
+try {
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has('edge_uid_seed')) {
+    const uid = localStorage.getItem('edge_uid');
+    const lbl = localStorage.getItem('edge_uid_label');
+    if (uid) {
+      url.searchParams.set('edge_uid_seed', uid);
+      if (lbl) url.searchParams.set('edge_uid_label', lbl);
+      window.location.replace(url.toString());
+    }
+  }
+} catch(e) {}
+</script>
+""",
+            height=0,
         )
     st.stop()
 
@@ -3165,6 +3225,17 @@ with st.sidebar:
     if st.button("Sign out", key="signout_btn", use_container_width=True):
         for _k in ("edge_user", "edge_user_label", "splash_shown"):
             st.session_state.pop(_k, None)
+        st.components.v1.html(
+            """
+<script>
+try {
+  localStorage.removeItem('edge_uid');
+  localStorage.removeItem('edge_uid_label');
+} catch(e) {}
+</script>
+""",
+            height=0,
+        )
         st.rerun()
 
     # ---- iOS Siri shortcut card (#75) ----
