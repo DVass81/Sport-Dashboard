@@ -16,6 +16,18 @@ import hashlib
 import json
 import pandas as pd
 import requests
+
+# Shared, connection-pooled HTTP session (saves a TLS handshake per call
+# to ESPN / SportsGameOdds; 2-3x faster on warm runs).
+_HTTP = requests.Session()
+try:
+    _adapter = requests.adapters.HTTPAdapter(
+        pool_connections=16, pool_maxsize=16, max_retries=0,
+    )
+    _HTTP.mount("https://", _adapter)
+    _HTTP.mount("http://", _adapter)
+except Exception:
+    pass
 import streamlit as st
 
 LEAGUES = [
@@ -203,17 +215,32 @@ def db_init():
     conn.close()
 
 
+def _kv_cache():
+    """Per-session memo of {scoped_key: value} so we don't round-trip
+    Postgres for every db_get_kv call (~10 per render)."""
+    try:
+        if "_kv_memo" not in st.session_state:
+            st.session_state["_kv_memo"] = {}
+        return st.session_state["_kv_memo"]
+    except Exception:
+        return {}
+
+
 def db_get_kv(key, default=None):
-    _ensure_schema()
     scoped = f"{_current_user()}::{key}"
+    cache = _kv_cache()
+    if scoped in cache:
+        v = cache[scoped]
+        return default if v is None else v
+    _ensure_schema()
     conn = db_conn()
     cur = conn.cursor()
     cur.execute(_q("SELECT v FROM kv WHERE k=?"), (scoped,))
     row = cur.fetchone()
     conn.close()
-    if not row:
-        return default
-    return row[0]
+    val = row[0] if row else None
+    cache[scoped] = val
+    return default if val is None else val
 
 
 def db_set_kv(key, value):
@@ -236,6 +263,8 @@ def db_set_kv(key, value):
         )
     conn.commit()
     conn.close()
+    # Write-through cache so reads on the same render see the new value.
+    _kv_cache()[scoped] = str(value)
 
 
 def _current_user():
@@ -563,7 +592,7 @@ def fetch_injuries(league_id):
     )
     out = {}
     try:
-        resp = requests.get(url, timeout=8)
+        resp = _HTTP.get(url, timeout=8)
         if resp.status_code != 200:
             return {}
         data = resp.json() or {}
@@ -900,7 +929,7 @@ def fetch_live_scoreboard(league_id):
     )
     out = []
     try:
-        r = requests.get(url, timeout=8)
+        r = _HTTP.get(url, timeout=8)
         if r.status_code != 200:
             return []
         data = r.json() or {}
@@ -1115,7 +1144,7 @@ def fetch_finals(league_id, date_iso):
     )
     out = []
     try:
-        r = requests.get(url, timeout=8)
+        r = _HTTP.get(url, timeout=8)
         if r.status_code != 200:
             return []
         data = r.json() or {}
@@ -1247,7 +1276,7 @@ def fetch_player_boxscore(league, date_iso):
             f"https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
             f"?dates={ymd}"
         )
-        r = requests.get(url, timeout=8)
+        r = _HTTP.get(url, timeout=8)
         if r.status_code != 200:
             return []
         events = (r.json() or {}).get("events") or []
@@ -1259,7 +1288,7 @@ def fetch_player_boxscore(league, date_iso):
         if not ev_id:
             continue
         try:
-            sr = requests.get(
+            sr = _HTTP.get(
                 f"https://site.api.espn.com/apis/site/v2/sports/{path}/summary"
                 f"?event={ev_id}",
                 timeout=8,
@@ -1432,7 +1461,7 @@ def fetch_ref_crew(league, date_iso, away, home):
             f"https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
             f"?dates={ymd}"
         )
-        r = requests.get(url, timeout=8)
+        r = _HTTP.get(url, timeout=8)
         if r.status_code != 200:
             return None
         events = (r.json() or {}).get("events") or []
@@ -1449,7 +1478,7 @@ def fetch_ref_crew(league, date_iso, away, home):
     if not target:
         return None
     try:
-        sr = requests.get(
+        sr = _HTTP.get(
             f"https://site.api.espn.com/apis/site/v2/sports/{path}/summary"
             f"?event={target.get('id')}",
             timeout=8,
@@ -1556,7 +1585,7 @@ def fetch_mlb_ump(date_iso, away_abbr, home_abbr):
             "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/"
             f"scoreboard?dates={ymd}"
         )
-        r = requests.get(url, timeout=8)
+        r = _HTTP.get(url, timeout=8)
         if r.status_code != 200:
             return None
         events = (r.json() or {}).get("events") or []
@@ -1573,7 +1602,7 @@ def fetch_mlb_ump(date_iso, away_abbr, home_abbr):
     if not target:
         return None
     try:
-        sr = requests.get(
+        sr = _HTTP.get(
             "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/"
             f"summary?event={target.get('id')}",
             timeout=8,
@@ -1741,7 +1770,7 @@ def fetch_events(league):
     if not key:
         return [], "SPORTS_GAME_ODDS_API_KEY is not configured."
     try:
-        r = requests.get(
+        r = _HTTP.get(
             f"{SGO_BASE}/events",
             params={
                 "leagueID": league,
@@ -2029,7 +2058,7 @@ def _alt_lines_for_event(raw_ev, books_filter, league):
 def fetch_pga_leaderboard():
     """Pull current PGA leaderboard from ESPN (free)."""
     try:
-        r = requests.get(
+        r = _HTTP.get(
             "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard",
             timeout=8,
         )
