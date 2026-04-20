@@ -1919,19 +1919,34 @@ def parse_event(ev, league, books_filter):
 _RAW_EVENT_CACHE = {}
 
 
-def get_board(league, books_filter):
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_parsed_board(league, books_filter_key):
+    """Cached parse pass. books_filter_key is a tuple (hashable)."""
+    bf = set(books_filter_key) if books_filter_key else set()
     raw, warn = fetch_events(league)
     if warn:
-        return [], warn
+        return [], warn, []
     events = []
+    raw_pairs = []  # (eid, away, home, raw_ev) for the warm map
     for ev in raw:
-        parsed = parse_event(ev, league, books_filter)
+        parsed = parse_event(ev, league, bf)
         if parsed:
             events.append(parsed)
             _eid = ev.get("eventID") or ev.get("id") or ""
-            if _eid:
-                _RAW_EVENT_CACHE[_eid] = ev
-                _RAW_EVENT_CACHE[(parsed.away, parsed.home, league)] = ev
+            raw_pairs.append((_eid, parsed.away, parsed.home, ev))
+    return events, None, raw_pairs
+
+
+def get_board(league, books_filter):
+    bf_key = tuple(sorted(books_filter)) if books_filter else tuple()
+    events, warn, raw_pairs = _cached_parsed_board(league, bf_key)
+    if warn:
+        return [], warn
+    # Rehydrate the warm raw-event lookup map (cheap, in-process only)
+    for _eid, away, home, ev in raw_pairs:
+        if _eid:
+            _RAW_EVENT_CACHE[_eid] = ev
+            _RAW_EVENT_CACHE[(away, home, league)] = ev
     return events, None
 
 
@@ -2063,8 +2078,25 @@ def all_picks(books_filter, kind, leagues_filter=None):
         lg for lg in LEAGUES
         if leagues_filter is None or lg["id"] in leagues_filter
     ]
+    # Parallel fetch across leagues so cold-cache load isn't N x latency.
+    from concurrent.futures import ThreadPoolExecutor
+    boards_by_lg = {}
+    if leagues_iter:
+        with ThreadPoolExecutor(
+            max_workers=min(8, len(leagues_iter))
+        ) as _ex:
+            _futs = {
+                _ex.submit(get_board, lg["id"], books_filter): lg
+                for lg in leagues_iter
+            }
+            for _f in _futs:
+                _lg = _futs[_f]
+                try:
+                    boards_by_lg[_lg["id"]] = _f.result()
+                except Exception:
+                    boards_by_lg[_lg["id"]] = ([], None)
     for lg in leagues_iter:
-        events, _ = get_board(lg["id"], books_filter)
+        events, _ = boards_by_lg.get(lg["id"], ([], None))
         for ev in events:
             if kind == "team":
                 for m in ev.markets:
@@ -4892,13 +4924,18 @@ with tab_bank:
     try:
         import time as _time_ag
         _last_ag = float(st.session_state.get("_last_autograde_ts", 0) or 0)
-        _open_for_ag = [b for b in bets if b["status"] == "open"]
+        # Skip entirely if no open bet's date is in the past (nothing to grade).
+        _open_for_ag = [
+            b for b in bets
+            if b["status"] == "open" and (b.get("date") or today) <= today
+        ]
         if _open_for_ag and (_time_ag.time() - _last_ag) > 300:
             st.session_state["_last_autograde_ts"] = _time_ag.time()
             with st.spinner("Auto-grading open bets from final scores..."):
                 _ag_team = auto_grade_open_bets(_open_for_ag, leagues_filter)
+                # Reuse in-memory list, just filter out anything just settled.
                 _open_for_ag2 = [
-                    b for b in db_load_bets() if b["status"] == "open"
+                    b for b in _open_for_ag if b["status"] == "open"
                 ]
                 _ag_prop = (
                     auto_grade_prop_bets(_open_for_ag2, leagues_filter)
