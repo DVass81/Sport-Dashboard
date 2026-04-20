@@ -1828,7 +1828,15 @@ def parse_event(ev, league, books_filter):
 
         if player_id:
             try:
-                point = float(info.get("overUnder") or info.get("spread") or 0)
+                point = float(
+                    info.get("overUnder")
+                    or info.get("bookOverUnder")
+                    or info.get("fairOverUnder")
+                    or info.get("spread")
+                    or info.get("bookSpread")
+                    or info.get("fairSpread")
+                    or 0
+                )
             except (TypeError, ValueError):
                 point = 0.0
             if side not in ("over", "under"):
@@ -1847,13 +1855,24 @@ def parse_event(ev, league, books_filter):
             grouped["Moneyline"][side].setdefault(None, []).extend(prices)
         elif bt == "sp" and side in ("home", "away"):
             try:
-                point = float(info.get("spread") or info.get("overUnder") or 0)
+                point = float(
+                    info.get("spread")
+                    or info.get("bookSpread")
+                    or info.get("fairSpread")
+                    or info.get("overUnder")
+                    or 0
+                )
             except (TypeError, ValueError):
                 point = None
             grouped["Spread"][side].setdefault(point, []).extend(prices)
         elif bt == "ou" and side in ("over", "under"):
             try:
-                point = float(info.get("overUnder") or 0)
+                point = float(
+                    info.get("overUnder")
+                    or info.get("bookOverUnder")
+                    or info.get("fairOverUnder")
+                    or 0
+                )
             except (TypeError, ValueError):
                 point = None
             grouped["Total"][side].setdefault(point, []).extend(prices)
