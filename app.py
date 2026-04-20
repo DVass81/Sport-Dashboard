@@ -4755,6 +4755,36 @@ with tab_bank:
     bets = db_load_bets()
     today = datetime.now(timezone.utc).date().isoformat()
 
+    # ---- Auto-grade open bets on tab load (throttled 5 min) ----
+    try:
+        import time as _time_ag
+        _last_ag = float(st.session_state.get("_last_autograde_ts", 0) or 0)
+        _open_for_ag = [b for b in bets if b["status"] == "open"]
+        if _open_for_ag and (_time_ag.time() - _last_ag) > 300:
+            st.session_state["_last_autograde_ts"] = _time_ag.time()
+            with st.spinner("Auto-grading open bets from final scores..."):
+                _ag_team = auto_grade_open_bets(_open_for_ag, leagues_filter)
+                _open_for_ag2 = [
+                    b for b in db_load_bets() if b["status"] == "open"
+                ]
+                _ag_prop = (
+                    auto_grade_prop_bets(_open_for_ag2, leagues_filter)
+                    if _open_for_ag2 else
+                    {"won": 0, "lost": 0, "push": 0}
+                )
+            _ag_settled = (
+                _ag_team["won"] + _ag_team["lost"] + _ag_team["push"]
+                + _ag_prop["won"] + _ag_prop["lost"] + _ag_prop["push"]
+            )
+            if _ag_settled:
+                st.toast(
+                    f"Auto-graded {_ag_settled} bet(s) from final scores.",
+                    icon="✅",
+                )
+                bets = db_load_bets()
+    except Exception as _ag_err:
+        st.caption(f"(Auto-grade skipped: {_ag_err})")
+
     # ---- H2H Leaderboard (#27) ----
     with st.expander("Leaderboard - all users on this book", expanded=False):
         lb = _h2h_leaderboard()
