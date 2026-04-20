@@ -3336,17 +3336,60 @@ Bankroll tab. Params: <code>addBet</code>, <code>book</code>,
         )
     st.markdown("---")
     st.markdown("### Bankroll")
-    bankroll = st.number_input("Bankroll ($)", min_value=10.0, value=500.0, step=10.0)
-    min_bet = st.number_input("Min bet ($)", min_value=1.0, value=1.0, step=1.0)
-    max_bet = st.number_input(
-        "Max bet ($)", min_value=min_bet, value=max(10.0, min_bet), step=1.0,
+
+    def _kv_float(key, default):
+        try:
+            return float(db_get_kv(key, str(default)) or default)
+        except Exception:
+            return float(default)
+
+    def _kv_int(key, default):
+        try:
+            return int(float(db_get_kv(key, str(default)) or default))
+        except Exception:
+            return int(default)
+
+    _saved_bk = _kv_float("cfg_bankroll", 500.0)
+    _saved_min = _kv_float("cfg_min_bet", 1.0)
+    _saved_max = _kv_float("cfg_max_bet", max(10.0, _saved_min))
+    _saved_cap = _kv_int("cfg_daily_cap_pct", 20)
+    _saved_goal = _kv_float(
+        "cfg_bankroll_goal", max(1000.0, _saved_bk * 2.0)
     )
-    daily_cap_pct = st.slider("Daily exposure cap (% of bankroll)", 5, 100, 20)
+
+    bankroll = st.number_input(
+        "Bankroll ($)", min_value=10.0, value=_saved_bk, step=10.0,
+    )
+    min_bet = st.number_input(
+        "Min bet ($)", min_value=1.0, value=_saved_min, step=1.0,
+    )
+    max_bet = st.number_input(
+        "Max bet ($)", min_value=min_bet,
+        value=max(min_bet, _saved_max), step=1.0,
+    )
+    daily_cap_pct = st.slider(
+        "Daily exposure cap (% of bankroll)", 5, 100, _saved_cap,
+    )
     bankroll_goal = st.number_input(
         "Bankroll goal ($)", min_value=float(bankroll) + 1.0,
-        value=max(1000.0, bankroll * 2.0), step=50.0,
+        value=max(float(bankroll) + 1.0, _saved_goal), step=50.0,
         help="Used by the Goal Progress thermometer on the Bankroll tab.",
     )
+
+    # Persist any change so it survives sign-out / new session
+    try:
+        if abs(bankroll - _saved_bk) > 1e-6:
+            db_set_kv("cfg_bankroll", str(bankroll))
+        if abs(min_bet - _saved_min) > 1e-6:
+            db_set_kv("cfg_min_bet", str(min_bet))
+        if abs(max_bet - _saved_max) > 1e-6:
+            db_set_kv("cfg_max_bet", str(max_bet))
+        if int(daily_cap_pct) != _saved_cap:
+            db_set_kv("cfg_daily_cap_pct", str(int(daily_cap_pct)))
+        if abs(bankroll_goal - _saved_goal) > 1e-6:
+            db_set_kv("cfg_bankroll_goal", str(bankroll_goal))
+    except Exception:
+        pass
 
     st.markdown("---")
     st.markdown("### Sizing model")
